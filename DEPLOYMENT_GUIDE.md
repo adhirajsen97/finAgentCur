@@ -72,24 +72,70 @@ curl -X POST https://your-app.onrender.com/api/market-data \
 
 ## 🐳 Docker Deployment
 
-### Dockerfile
+### Updated Dockerfile Features:
+- ✅ **Multi-stage build** for optimized image size
+- ✅ **Non-root user** for security
+- ✅ **Health check** with fallback port handling
+- ✅ **Optimized file copying** (only necessary files)
+- ✅ **Enhanced logging** with access logs
+- ✅ **Port flexibility** with fallback to 8000
+- ✅ **Build optimization** with .dockerignore
+
+### Key Dockerfile Improvements:
 ```dockerfile
+# Multi-stage build with optimizations
 FROM python:3.11-slim as builder
-# ... (multi-stage build for optimization)
-CMD ["sh", "-c", "uvicorn main_enhanced_complete:app --host 0.0.0.0 --port $PORT --workers 1"]
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+
+# Production stage with security
+FROM python:3.11-slim
+ENV PORT=8000
+RUN groupadd -r appuser && useradd -r -g appuser appuser
+
+# Health check with port fallback
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:${PORT:-8000}/health || exit 1
+
+# Enhanced startup command
+CMD ["sh", "-c", "uvicorn main_enhanced_complete:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --access-log --log-level info"]
 ```
 
 ### Docker Commands:
 ```bash
-# Build
+# Build (optimized with .dockerignore)
 docker build -t finagent-enhanced .
 
-# Run locally
+# Run locally with environment variables
 docker run -p 8000:8000 -e PORT=8000 finagent-enhanced
 
-# Test
+# Run with custom port
+docker run -p 3000:3000 -e PORT=3000 finagent-enhanced
+
+# Run with API keys (optional)
+docker run -p 8000:8000 \
+  -e PORT=8000 \
+  -e OPENAI_API_KEY=your_key \
+  -e ALPHA_VANTAGE_API_KEY=your_key \
+  finagent-enhanced
+
+# Test endpoints
 curl http://localhost:8000/health
+curl http://localhost:8000/workflow
+curl http://localhost:8000/api/workflow-guide
 ```
+
+### Docker Test Script:
+```bash
+# Run comprehensive Docker tests
+./docker-test.sh
+```
+
+### Docker Image Optimization:
+- **Base image**: python:3.11-slim (smaller footprint)
+- **Multi-stage build**: Separates build and runtime dependencies
+- **Layer caching**: Optimized layer order for faster rebuilds
+- **Security**: Non-root user execution
+- **File exclusion**: .dockerignore reduces build context size
 
 ## 📊 Monitoring
 
