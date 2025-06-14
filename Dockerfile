@@ -58,4 +58,4 @@ HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
 EXPOSE $PORT
 
 # Run the application (Render provides PORT environment variable)
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1"] 
+CMD ["sh", "-c", "uvicorn main_enhanced_complete:app --host 0.0.0.0 --port $PORT --workers 1"] 
