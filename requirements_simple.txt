@@ -1,4 +1,15 @@
+# FinAgent Simplified Requirements
+# Core FastAPI and Async
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 pydantic==2.5.0
-python-multipart==0.0.6 
+httpx==0.26.0
+
+# Database
+supabase==2.9.0
+
+# Market Data APIs
+aiohttp==3.9.1
+
+# Environment
+python-dotenv==1.0.0 
