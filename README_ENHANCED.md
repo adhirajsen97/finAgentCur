@@ -103,6 +103,9 @@ python test_enhanced.py
 - `POST /api/agents/risk-analyst` - Risk assessment and management
 - `POST /api/agents/trading-analyst` - Technical analysis and signals
 
+### 🚀 **Unified Strategy API** ⭐ NEW!
+- `POST /api/unified-strategy` - **Complete investment strategy with actionable trade orders**
+
 ### ⚖️ **Compliance**
 - `GET /api/compliance/disclosures` - Regulatory disclosures
 
@@ -155,6 +158,29 @@ for symbol, quote in quotes.items():
     print(f"{symbol}: ${quote['price']:.2f} - {tech.get('trend', 'N/A')}")
 ```
 
+### **🚀 Unified Investment Strategy** ⭐ NEW!
+```python
+# Get complete investment strategy with actionable trade orders
+response = httpx.post("http://localhost:8000/api/unified-strategy", json={
+    "portfolio": {"VTI": 50000.0, "BNDX": 30000.0, "GSG": 20000.0},
+    "total_value": 100000.0,
+    "available_cash": 10000.0,
+    "time_horizon": "3 weeks",
+    "risk_tolerance": "moderate",
+    "investment_goals": ["rebalancing"]
+})
+
+strategy = response.json()["strategy"]
+trade_orders = strategy["trade_orders"]
+
+# Execute trades based on priority
+for order in sorted(trade_orders, key=lambda x: {"HIGH": 3, "MEDIUM": 2, "LOW": 1}[x["priority"]], reverse=True):
+    print(f"{order['action']} {order['quantity']} shares of {order['symbol']}")
+    print(f"Amount: ${order['dollar_amount']:,.2f} at ${order['current_price']:.2f}")
+    print(f"Priority: {order['priority']} - {order['reason']}")
+    # Your trade execution logic here
+```
+
 ## 🔧 **Configuration**
 
 ### **Environment Variables**
@@ -192,6 +218,9 @@ The enhanced schema includes:
 | Database Schema | ✅ 2 tables | ✅ 6 tables with audit trail |
 | Performance Tracking | ❌ | ✅ Strategy performance |
 | Market Sentiment | ❌ | ✅ Sentiment analysis |
+| **🚀 Unified Strategy API** | ❌ | ✅ **Complete trade-ready strategies** |
+| **Actionable Trade Orders** | ❌ | ✅ **Specific buy/sell with quantities** |
+| **Priority-based Execution** | ❌ | ✅ **HIGH/MEDIUM/LOW priorities** |
 
 ## 🧪 **Testing**
 

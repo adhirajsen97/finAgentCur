@@ -86,6 +86,28 @@ class TradingAnalysisRequest(BaseModel):
     symbols: List[str] = Field(..., description="Symbols to analyze")
     analysis_type: Optional[str] = Field(default="technical", description="Type of analysis")
 
+class UnifiedStrategyRequest(BaseModel):
+    """Unified investment strategy request"""
+    portfolio: Dict[str, float] = Field(..., description="Current portfolio holdings")
+    total_value: float = Field(..., gt=0, description="Total portfolio value")
+    available_cash: Optional[float] = Field(default=0.0, description="Available cash for investing")
+    time_horizon: Optional[str] = Field(default="3 weeks", description="Investment time horizon")
+    risk_tolerance: Optional[str] = Field(default="moderate", description="Risk tolerance: conservative, moderate, aggressive")
+    investment_goals: Optional[List[str]] = Field(default=["rebalancing"], description="Investment goals: rebalancing, growth, income, etc.")
+    
+class TradeOrder(BaseModel):
+    """Individual trade order"""
+    symbol: str = Field(..., description="Trading symbol")
+    action: str = Field(..., description="BUY, SELL, or HOLD")
+    order_type: str = Field(default="MARKET", description="MARKET, LIMIT, etc.")
+    quantity: Optional[float] = Field(default=None, description="Number of shares")
+    dollar_amount: Optional[float] = Field(default=None, description="Dollar amount to invest")
+    current_price: Optional[float] = Field(default=None, description="Current market price")
+    target_price: Optional[float] = Field(default=None, description="Target price for limit orders")
+    priority: str = Field(default="MEDIUM", description="HIGH, MEDIUM, LOW")
+    reason: str = Field(..., description="Reason for this trade")
+    expected_impact: str = Field(..., description="Expected impact on portfolio")
+
 # ============================================================================
 # STRAIGHT ARROW STRATEGY
 # ============================================================================
@@ -596,12 +618,350 @@ DISCLAIMER: Technical analysis is educational. Past patterns don't predict futur
             return "Analysis not available. Please try again later."
 
 # ============================================================================
+# UNIFIED STRATEGY ORCHESTRATOR
+# ============================================================================
+
+class UnifiedStrategyOrchestrator:
+    """Orchestrates all services to create comprehensive investment strategies with actionable trade orders"""
+    
+    def __init__(self, strategy_service, market_service, ai_service):
+        self.strategy_service = strategy_service
+        self.market_service = market_service
+        self.ai_service = ai_service
+        self.straight_arrow_symbols = ["VTI", "BNDX", "GSG"]
+    
+    async def create_investment_strategy(self, request: UnifiedStrategyRequest) -> Dict[str, Any]:
+        """Create a comprehensive investment strategy with actionable trade orders"""
+        try:
+            # Step 1: Get current market data
+            logger.info("Fetching current market data...")
+            market_data = await self.market_service.get_quotes(self.straight_arrow_symbols)
+            
+            # Step 2: Analyze current portfolio
+            logger.info("Analyzing current portfolio...")
+            portfolio_analysis = self.strategy_service.analyze_portfolio(
+                request.portfolio, 
+                request.total_value
+            )
+            
+            # Step 3: Get market sentiment
+            logger.info("Analyzing market sentiment...")
+            market_sentiment = await self.market_service.get_market_sentiment()
+            
+            # Step 4: Get AI insights
+            logger.info("Getting AI analysis...")
+            ai_query = f"Given the current market conditions, analyze the investment strategy for a {request.time_horizon} time horizon with {request.risk_tolerance} risk tolerance. Focus on portfolio rebalancing and tactical adjustments."
+            ai_analysis = await self.ai_service.data_analyst(ai_query, self.straight_arrow_symbols)
+            
+            # Step 5: Get risk analysis
+            logger.info("Conducting risk analysis...")
+            risk_analysis = await self.ai_service.risk_analyst(
+                request.portfolio, 
+                request.total_value, 
+                request.time_horizon
+            )
+            
+            # Step 6: Generate trade orders
+            logger.info("Generating trade orders...")
+            trade_orders = self._generate_trade_orders(
+                portfolio_analysis, 
+                market_data, 
+                request.available_cash,
+                request.total_value,
+                market_sentiment
+            )
+            
+            # Step 7: Create comprehensive strategy response
+            strategy = {
+                "strategy_id": f"strategy_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                "created_at": datetime.now().isoformat(),
+                "time_horizon": request.time_horizon,
+                "risk_tolerance": request.risk_tolerance,
+                "investment_goals": request.investment_goals,
+                "strategy_type": "Straight Arrow Enhanced",
+                
+                # Market Context
+                "market_context": {
+                    "current_prices": {symbol: data.get("price", 0) for symbol, data in market_data.items()},
+                    "market_sentiment": market_sentiment.get("sentiment", {}),
+                    "technical_analysis": {
+                        symbol: data.get("technical_analysis", {}) 
+                        for symbol, data in market_data.items()
+                    }
+                },
+                
+                # Portfolio Analysis
+                "portfolio_analysis": {
+                    "current_allocation": portfolio_analysis["current_weights"],
+                    "target_allocation": portfolio_analysis["target_allocation"],
+                    "drift_analysis": portfolio_analysis["drift_analysis"],
+                    "risk_metrics": portfolio_analysis["portfolio_metrics"],
+                    "compliance_status": portfolio_analysis["compliance"]["status"],
+                    "needs_rebalancing": portfolio_analysis["risk_assessment"]["needs_rebalancing"]
+                },
+                
+                # AI Insights
+                "ai_insights": {
+                    "market_analysis": ai_analysis.get("analysis", ""),
+                    "risk_assessment": risk_analysis.get("analysis", ""),
+                    "confidence_score": (ai_analysis.get("confidence", 0) + risk_analysis.get("confidence", 0)) / 2
+                },
+                
+                # Actionable Trade Orders
+                "trade_orders": trade_orders,
+                
+                # Strategy Summary
+                "strategy_summary": self._create_strategy_summary(portfolio_analysis, trade_orders, market_sentiment),
+                
+                # Execution Guidelines
+                "execution_guidelines": self._create_execution_guidelines(trade_orders, market_sentiment),
+                
+                # Risk Warnings
+                "risk_warnings": self._create_risk_warnings(portfolio_analysis, market_sentiment),
+                
+                # Performance Expectations
+                "performance_expectations": self._create_performance_expectations(portfolio_analysis),
+                
+                # Next Review Date
+                "next_review_date": self._calculate_next_review_date(request.time_horizon)
+            }
+            
+            # Save strategy to database if available
+            if supabase:
+                try:
+                    supabase.table("investment_strategies").insert({
+                        "strategy_id": strategy["strategy_id"],
+                        "created_at": strategy["created_at"],
+                        "portfolio_value": request.total_value,
+                        "time_horizon": request.time_horizon,
+                        "risk_tolerance": request.risk_tolerance,
+                        "trade_orders": trade_orders,
+                        "ai_confidence": strategy["ai_insights"]["confidence_score"]
+                    }).execute()
+                except Exception as e:
+                    logger.error(f"Failed to save strategy: {e}")
+            
+            return strategy
+            
+        except Exception as e:
+            logger.error(f"Strategy creation error: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to create investment strategy: {str(e)}")
+    
+    def _generate_trade_orders(self, portfolio_analysis, market_data, available_cash, total_value, market_sentiment) -> List[Dict[str, Any]]:
+        """Generate specific trade orders based on analysis"""
+        trade_orders = []
+        
+        # Get current prices
+        current_prices = {symbol: data.get("price", 0) for symbol, data in market_data.items()}
+        
+        # Process rebalancing recommendations
+        recommendations = portfolio_analysis.get("recommendations", [])
+        for rec in recommendations:
+            symbol = rec["symbol"]
+            action = rec["action"]
+            current_percent = rec["current_percent"]
+            target_percent = rec["target_percent"]
+            
+            if symbol not in current_prices:
+                continue
+                
+            current_price = current_prices[symbol]
+            
+            # Calculate dollar amounts
+            current_value = (current_percent / 100) * total_value
+            target_value = (target_percent / 100) * total_value
+            difference_value = target_value - current_value
+            
+            # Determine trade details
+            if abs(difference_value) > 1000:  # Only trade if difference > $1000
+                if difference_value > 0:  # Need to buy
+                    order_action = "BUY"
+                    dollar_amount = min(difference_value, available_cash)
+                    quantity = dollar_amount / current_price if current_price > 0 else 0
+                else:  # Need to sell
+                    order_action = "SELL"
+                    dollar_amount = abs(difference_value)
+                    quantity = dollar_amount / current_price if current_price > 0 else 0
+                
+                # Get technical analysis for additional context
+                tech_analysis = market_data.get(symbol, {}).get("technical_analysis", {})
+                trend = tech_analysis.get("trend", "NEUTRAL")
+                
+                # Adjust priority based on market conditions and technical analysis
+                priority = self._determine_trade_priority(rec["priority"], trend, market_sentiment)
+                
+                trade_order = {
+                    "symbol": symbol,
+                    "action": order_action,
+                    "order_type": "MARKET",
+                    "quantity": round(quantity, 2),
+                    "dollar_amount": round(dollar_amount, 2),
+                    "current_price": current_price,
+                    "priority": priority,
+                    "reason": f"Rebalance to target allocation: {current_percent:.1f}% → {target_percent:.1f}%",
+                    "expected_impact": f"Brings {symbol} allocation closer to Straight Arrow target",
+                    "technical_context": f"Market trend: {trend}, Recommendation: {tech_analysis.get('recommendation', 'HOLD')}",
+                    "timing_suggestion": self._get_timing_suggestion(trend, market_sentiment)
+                }
+                
+                trade_orders.append(trade_order)
+        
+        # Add cash investment recommendations if available cash > $5000
+        if available_cash > 5000:
+            cash_orders = self._generate_cash_investment_orders(available_cash, current_prices, market_sentiment)
+            trade_orders.extend(cash_orders)
+        
+        return trade_orders
+    
+    def _generate_cash_investment_orders(self, available_cash, current_prices, market_sentiment) -> List[Dict[str, Any]]:
+        """Generate orders for investing available cash according to Straight Arrow allocation"""
+        cash_orders = []
+        target_allocation = {"VTI": 0.60, "BNDX": 0.30, "GSG": 0.10}
+        
+        for symbol, target_weight in target_allocation.items():
+            if symbol not in current_prices:
+                continue
+                
+            investment_amount = available_cash * target_weight
+            current_price = current_prices[symbol]
+            quantity = investment_amount / current_price if current_price > 0 else 0
+            
+            if investment_amount >= 500:  # Minimum $500 investment
+                cash_order = {
+                    "symbol": symbol,
+                    "action": "BUY",
+                    "order_type": "MARKET",
+                    "quantity": round(quantity, 2),
+                    "dollar_amount": round(investment_amount, 2),
+                    "current_price": current_price,
+                    "priority": "MEDIUM",
+                    "reason": f"Invest available cash according to Straight Arrow allocation ({target_weight:.0%})",
+                    "expected_impact": f"Increases {symbol} position while maintaining target allocation",
+                    "technical_context": "Cash deployment following strategic allocation",
+                    "timing_suggestion": "Execute as market orders for immediate deployment"
+                }
+                cash_orders.append(cash_order)
+        
+        return cash_orders
+    
+    def _determine_trade_priority(self, base_priority, trend, market_sentiment) -> str:
+        """Determine trade priority based on multiple factors"""
+        sentiment = market_sentiment.get("sentiment", {})
+        overall_sentiment = sentiment.get("overall_sentiment", "NEUTRAL")
+        
+        # Upgrade priority if market conditions are favorable
+        if base_priority == "HIGH":
+            return "HIGH"
+        elif base_priority == "MEDIUM" and trend == "BULLISH" and overall_sentiment == "BULLISH":
+            return "HIGH"
+        elif base_priority == "MEDIUM" and trend == "BEARISH" and overall_sentiment == "BEARISH":
+            return "LOW"  # Delay selling in bearish conditions
+        else:
+            return base_priority
+    
+    def _get_timing_suggestion(self, trend, market_sentiment) -> str:
+        """Get timing suggestions based on market conditions"""
+        sentiment = market_sentiment.get("sentiment", {})
+        overall_sentiment = sentiment.get("overall_sentiment", "NEUTRAL")
+        
+        if trend == "BULLISH" and overall_sentiment == "BULLISH":
+            return "Execute soon - favorable market conditions"
+        elif trend == "BEARISH" and overall_sentiment == "BEARISH":
+            return "Consider delay - monitor market conditions"
+        else:
+            return "Execute when convenient - neutral conditions"
+    
+    def _create_strategy_summary(self, portfolio_analysis, trade_orders, market_sentiment) -> Dict[str, Any]:
+        """Create a summary of the investment strategy"""
+        total_trades = len(trade_orders)
+        buy_orders = [order for order in trade_orders if order["action"] == "BUY"]
+        sell_orders = [order for order in trade_orders if order["action"] == "SELL"]
+        
+        return {
+            "overview": f"Straight Arrow rebalancing strategy with {total_trades} recommended trades",
+            "total_trades": total_trades,
+            "buy_orders": len(buy_orders),
+            "sell_orders": len(sell_orders),
+            "total_investment": sum(order["dollar_amount"] for order in buy_orders),
+            "total_divestment": sum(order["dollar_amount"] for order in sell_orders),
+            "rebalancing_needed": portfolio_analysis["risk_assessment"]["needs_rebalancing"],
+            "market_conditions": market_sentiment.get("sentiment", {}).get("overall_sentiment", "NEUTRAL"),
+            "strategy_confidence": "HIGH" if total_trades <= 3 else "MEDIUM"
+        }
+    
+    def _create_execution_guidelines(self, trade_orders, market_sentiment) -> Dict[str, Any]:
+        """Create execution guidelines for the trades"""
+        high_priority_trades = [order for order in trade_orders if order["priority"] == "HIGH"]
+        
+        return {
+            "execution_order": "Execute HIGH priority trades first, then MEDIUM, then LOW",
+            "timing": "Spread trades over 1-3 days to minimize market impact",
+            "market_hours": "Execute during regular trading hours for better liquidity",
+            "monitoring": "Monitor positions for 24-48 hours after execution",
+            "high_priority_count": len(high_priority_trades),
+            "suggested_sequence": [
+                f"{order['action']} {order['symbol']}: ${order['dollar_amount']:,.0f}" 
+                for order in sorted(trade_orders, key=lambda x: {"HIGH": 3, "MEDIUM": 2, "LOW": 1}[x["priority"]], reverse=True)[:5]
+            ]
+        }
+    
+    def _create_risk_warnings(self, portfolio_analysis, market_sentiment) -> List[str]:
+        """Create appropriate risk warnings"""
+        warnings = [
+            "All investments carry risk of loss. Past performance does not guarantee future results.",
+            "Market conditions can change rapidly. Monitor your positions regularly.",
+            "This strategy is based on the Straight Arrow methodology and may not suit all investors."
+        ]
+        
+        # Add specific warnings based on analysis
+        risk_assessment = portfolio_analysis.get("risk_assessment", {})
+        if risk_assessment.get("overall_risk") == "HIGH":
+            warnings.append("Your portfolio shows HIGH risk levels. Consider reducing position sizes.")
+        
+        compliance = portfolio_analysis.get("compliance", {})
+        if compliance.get("status") != "COMPLIANT":
+            warnings.append("Portfolio compliance issues detected. Review recommendations carefully.")
+        
+        sentiment = market_sentiment.get("sentiment", {})
+        if sentiment.get("overall_sentiment") == "BEARISH":
+            warnings.append("Current market sentiment is bearish. Consider phased execution of trades.")
+        
+        return warnings
+    
+    def _create_performance_expectations(self, portfolio_analysis) -> Dict[str, Any]:
+        """Create performance expectations"""
+        metrics = portfolio_analysis.get("portfolio_metrics", {})
+        target_metrics = portfolio_analysis.get("target_metrics", {})
+        
+        return {
+            "expected_annual_return": f"{target_metrics.get('expected_return', 0):.1%}",
+            "expected_volatility": f"{target_metrics.get('volatility', 0):.1%}",
+            "current_sharpe_ratio": f"{metrics.get('sharpe_ratio', 0):.2f}",
+            "target_sharpe_ratio": f"{target_metrics.get('sharpe_ratio', 0):.2f}",
+            "improvement_potential": "Portfolio metrics should improve after rebalancing",
+            "time_horizon_note": "Expected returns are long-term averages and may vary significantly in short periods"
+        }
+    
+    def _calculate_next_review_date(self, time_horizon: str) -> str:
+        """Calculate when to next review the strategy"""
+        if "week" in time_horizon.lower():
+            days_ahead = 7
+        elif "month" in time_horizon.lower():
+            days_ahead = 30
+        else:
+            days_ahead = 14  # Default to 2 weeks
+        
+        next_review = datetime.now() + timedelta(days=days_ahead)
+        return next_review.isoformat()
+
+# ============================================================================
 # INITIALIZE SERVICES
 # ============================================================================
 
 strategy_service = StraightArrowStrategy()
 market_service = MarketDataService()
 ai_service = AIAgentService()
+orchestrator_service = UnifiedStrategyOrchestrator(strategy_service, market_service, ai_service)
 
 # ============================================================================
 # API ENDPOINTS
@@ -737,6 +1097,44 @@ async def ai_trading_analyst(request: TradingAnalysisRequest):
     except Exception as e:
         logger.error(f"Trading analyst error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# UNIFIED INVESTMENT STRATEGY ENDPOINT
+# ============================================================================
+
+@app.post("/api/unified-strategy")
+async def create_unified_investment_strategy(request: UnifiedStrategyRequest):
+    """
+    🚀 UNIFIED INVESTMENT STRATEGY API
+    
+    Creates a comprehensive investment strategy by orchestrating all available services:
+    - Portfolio analysis and rebalancing recommendations
+    - Real-time market data and technical analysis
+    - AI-powered market insights and risk assessment
+    - Actionable trade orders with priorities and execution guidelines
+    
+    Returns detailed trading recommendations for frontend execution.
+    """
+    try:
+        logger.info(f"Creating unified strategy for portfolio value: ${request.total_value:,.2f}")
+        
+        # Call the orchestrator to create comprehensive strategy
+        strategy = await orchestrator_service.create_investment_strategy(request)
+        
+        return {
+            "status": "success",
+            "strategy": strategy,
+            "execution_ready": True,
+            "api_version": "1.6.0",
+            "disclaimer": "This strategy is for educational purposes only. Not financial advice."
+        }
+        
+    except Exception as e:
+        logger.error(f"Unified strategy creation error: {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to create unified investment strategy: {str(e)}"
+        )
 
 # ============================================================================
 # ADDITIONAL ENDPOINTS
@@ -1009,486 +1407,10 @@ for i, disclosure in enumerate(disclosures[:3]):
             ],
             "complete_workflow_example": {
                 "title": "Complete Python Workflow Script",
-                "description": "Full Python script implementing all 9 steps",
-                "code": """import httpx
-import asyncio
-from datetime import datetime
-
-class FinAgentWorkflow:
-    def __init__(self, base_url="http://localhost:8000"):
-        self.client = httpx.AsyncClient(base_url=base_url)
-        self.portfolio = {"VTI": 50000.0, "BNDX": 30000.0, "GSG": 20000.0}
-        self.total_value = 100000.0
-    
-    async def run_complete_workflow(self):
-        print("🚀 FinAgent 3-Week Strategy Workflow")
-        print("=" * 50)
-        
-        # Step 1: Health check
-        health = await self.client.get("/health")
-        print(f"✅ System Status: {health.json()['status']}")
-        
-        # Step 2: Market data
-        market_data = await self.client.post("/api/market-data", 
-            json={"symbols": ["VTI", "BNDX", "GSG"]})
-        quotes = market_data.json()["quotes"]
-        print("📈 Current Market Data:")
-        for symbol, quote in quotes.items():
-            print(f"  {symbol}: ${quote['price']:.2f}")
-        
-        # Step 3: Market sentiment
-        sentiment = await self.client.get("/api/market-sentiment")
-        sentiment_data = sentiment.json()["sentiment"]
-        print(f"🎭 Market Sentiment: {sentiment_data['overall_sentiment']}")
-        
-        # Step 4-6: AI Agents (parallel execution)
-        data_task = self.client.post("/api/agents/data-analyst", json={
-            "query": "3-week market outlook for Straight Arrow strategy",
-            "symbols": ["VTI", "BNDX", "GSG"]
-        })
-        risk_task = self.client.post("/api/agents/risk-analyst", json={
-            "portfolio": self.portfolio,
-            "total_value": self.total_value,
-            "time_horizon": "3 weeks"
-        })
-        trading_task = self.client.post("/api/agents/trading-analyst", json={
-            "symbols": ["VTI", "BNDX", "GSG"],
-            "analysis_type": "short-term"
-        })
-        
-        data_analysis, risk_analysis, trading_analysis = await asyncio.gather(
-            data_task, risk_task, trading_task
-        )
-        
-        print("🤖 AI Analysis Complete:")
-        print(f"  Data Analyst Confidence: {data_analysis.json()['analysis']['confidence']}")
-        print(f"  Risk Analyst Confidence: {risk_analysis.json()['analysis']['confidence']}")
-        print(f"  Trading Analyst Confidence: {trading_analysis.json()['analysis']['confidence']}")
-        
-        # Step 5: Portfolio analysis
-        portfolio_analysis = await self.client.post("/api/analyze-portfolio", json={
-            "portfolio": self.portfolio,
-            "total_value": self.total_value
-        })
-        analysis = portfolio_analysis.json()["analysis"]
-        print(f"📊 Portfolio Metrics:")
-        print(f"  Expected Return: {analysis['portfolio_metrics']['expected_return']:.1%}")
-        print(f"  Sharpe Ratio: {analysis['portfolio_metrics']['sharpe_ratio']:.2f}")
-        print(f"  Compliance: {analysis['compliance']['status']}")
-        
-        await self.client.aclose()
-        return "Workflow completed successfully!"
-
-# Usage
-async def main():
-    workflow = FinAgentWorkflow()
-    result = await workflow.run_complete_workflow()
-    print(result)
-
-if __name__ == "__main__":
-    asyncio.run(main())"""
-            },
-            "best_practices": [
-                {
-                    "title": "Parallel API Calls",
-                    "description": "Use asyncio.gather() to call multiple AI agents simultaneously for faster execution"
-                },
-                {
-                    "title": "Error Handling",
-                    "description": "Always check response status codes and handle API errors gracefully"
-                },
-                {
-                    "title": "Rate Limiting",
-                    "description": "Be mindful of API rate limits, especially for external services like OpenAI"
-                },
-                {
-                    "title": "Data Validation",
-                    "description": "Validate portfolio data and ensure total_value matches sum of holdings"
-                },
-                {
-                    "title": "Regular Updates",
-                    "description": "Run workflow weekly for 3-week strategies to adapt to changing market conditions"
-                }
-            ],
-            "expected_outcomes": [
-                "Comprehensive market assessment with real-time data",
-                "AI-powered insights from 3 specialized agents",
-                "Risk-adjusted portfolio recommendations",
-                "Specific rebalancing actions with priorities",
-                "Compliance validation and regulatory awareness",
-                "Performance expectations and risk metrics"
-            ]
+                "description": "Full Python script implementing all 9 steps - see WORKFLOW_GUIDE_UNIFIED.md for complete examples"
+            }
         }
     }
-
-@app.get("/workflow", response_class=HTMLResponse)
-async def get_workflow_html():
-    """Get workflow guide as formatted HTML page"""
-    html_content = """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>FinAgent API - Complete Workflow Guide</title>
-        <style>
-            body {
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                line-height: 1.6;
-                color: #333;
-                max-width: 1200px;
-                margin: 0 auto;
-                padding: 20px;
-                background: #f8f9fa;
-            }
-            .header {
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white;
-                padding: 2rem;
-                border-radius: 10px;
-                margin-bottom: 2rem;
-                text-align: center;
-            }
-            .step {
-                background: white;
-                margin: 1.5rem 0;
-                padding: 1.5rem;
-                border-radius: 8px;
-                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-                border-left: 4px solid #667eea;
-            }
-            .step-number {
-                background: #667eea;
-                color: white;
-                width: 30px;
-                height: 30px;
-                border-radius: 50%;
-                display: inline-flex;
-                align-items: center;
-                justify-content: center;
-                font-weight: bold;
-                margin-right: 10px;
-            }
-            .code-block {
-                background: #f1f3f4;
-                padding: 1rem;
-                border-radius: 5px;
-                font-family: 'Monaco', 'Menlo', monospace;
-                font-size: 0.9rem;
-                overflow-x: auto;
-                margin: 1rem 0;
-                border: 1px solid #e0e0e0;
-            }
-            .insights {
-                background: #e8f5e8;
-                padding: 1rem;
-                border-radius: 5px;
-                border-left: 4px solid #4caf50;
-                margin: 1rem 0;
-            }
-            .insights h4 {
-                color: #2e7d32;
-                margin-top: 0;
-            }
-            .best-practices {
-                background: #fff3e0;
-                padding: 1.5rem;
-                border-radius: 8px;
-                margin: 2rem 0;
-                border-left: 4px solid #ff9800;
-            }
-            .outcomes {
-                background: #e3f2fd;
-                padding: 1.5rem;
-                border-radius: 8px;
-                margin: 2rem 0;
-                border-left: 4px solid #2196f3;
-            }
-            .tab-container {
-                margin: 1rem 0;
-            }
-            .tab-buttons {
-                display: flex;
-                margin-bottom: 1rem;
-            }
-            .tab-button {
-                background: #f1f3f4;
-                border: none;
-                padding: 0.5rem 1rem;
-                cursor: pointer;
-                border-radius: 5px 5px 0 0;
-                margin-right: 2px;
-            }
-            .tab-button.active {
-                background: #667eea;
-                color: white;
-            }
-            .tab-content {
-                display: none;
-            }
-            .tab-content.active {
-                display: block;
-            }
-            ul {
-                padding-left: 1.5rem;
-            }
-            li {
-                margin: 0.5rem 0;
-            }
-        </style>
-    </head>
-    <body>
-        <div class="header">
-            <h1>🚀 FinAgent API - Complete Workflow Guide</h1>
-            <p>Step-by-step guide to create effective 3-week investment strategies</p>
-            <p><strong>Strategy:</strong> Straight Arrow (60% VTI, 30% BNDX, 10% GSG)</p>
-        </div>
-
-        <div class="step">
-            <h2><span class="step-number">1</span>Health Check & Feature Verification</h2>
-            <p>Verify all enhanced features are available before starting your analysis.</p>
-            
-            <div class="tab-container">
-                <div class="tab-buttons">
-                    <button class="tab-button active" onclick="showTab(event, 'curl1')">cURL</button>
-                    <button class="tab-button" onclick="showTab(event, 'python1')">Python</button>
-                </div>
-                <div id="curl1" class="tab-content active">
-                    <div class="code-block">curl -X GET "http://localhost:8000/health"</div>
-                </div>
-                <div id="python1" class="tab-content">
-                    <div class="code-block">import httpx
-response = httpx.get("http://localhost:8000/health")
-features = response.json()["features"]
-print(f"Available agents: {features['agents']}")</div>
-                </div>
-            </div>
-            
-            <div class="insights">
-                <h4>🎯 What You Get:</h4>
-                <ul>
-                    <li>System health status</li>
-                    <li>Available AI agents (3 specialized agents)</li>
-                    <li>Feature availability (compliance, risk metrics)</li>
-                    <li>Data source status (OpenAI, Alpha Vantage)</li>
-                </ul>
-            </div>
-        </div>
-
-        <div class="step">
-            <h2><span class="step-number">2</span>Get Current Market Data & Technical Analysis</h2>
-            <p>Get real-time market data with technical indicators for VTI, BNDX, and GSG.</p>
-            
-            <div class="tab-container">
-                <div class="tab-buttons">
-                    <button class="tab-button active" onclick="showTab(event, 'curl2')">cURL</button>
-                    <button class="tab-button" onclick="showTab(event, 'python2')">Python</button>
-                </div>
-                <div id="curl2" class="tab-content active">
-                    <div class="code-block">curl -X POST "http://localhost:8000/api/market-data" \\
-  -H "Content-Type: application/json" \\
-  -d '{"symbols": ["VTI", "BNDX", "GSG"]}'</div>
-                </div>
-                <div id="python2" class="tab-content">
-                    <div class="code-block">response = httpx.post("http://localhost:8000/api/market-data", json={
-    "symbols": ["VTI", "BNDX", "GSG"]
-})
-market_data = response.json()
-for symbol, quote in market_data["quotes"].items():
-    tech = quote.get("technical_analysis", {})
-    print(f"{symbol}: ${quote['price']:.2f} | {tech.get('trend', 'N/A')}")</div>
-                </div>
-            </div>
-            
-            <div class="insights">
-                <h4>📈 Key Insights:</h4>
-                <ul>
-                    <li>Current prices and price changes</li>
-                    <li>Technical trend analysis (BULLISH/BEARISH)</li>
-                    <li>Support and resistance levels</li>
-                    <li>Trading recommendations</li>
-                </ul>
-            </div>
-        </div>
-
-        <div class="step">
-            <h2><span class="step-number">3</span>Get Market Sentiment Analysis</h2>
-            <p>Check overall market sentiment for timing decisions.</p>
-            
-            <div class="tab-container">
-                <div class="tab-buttons">
-                    <button class="tab-button active" onclick="showTab(event, 'curl3')">cURL</button>
-                    <button class="tab-button" onclick="showTab(event, 'python3')">Python</button>
-                </div>
-                <div id="curl3" class="tab-content active">
-                    <div class="code-block">curl -X GET "http://localhost:8000/api/market-sentiment"</div>
-                </div>
-                <div id="python3" class="tab-content">
-                    <div class="code-block">response = httpx.get("http://localhost:8000/api/market-sentiment")
-sentiment = response.json()["sentiment"]
-print(f"Market Sentiment: {sentiment['overall_sentiment']}")
-print(f"Fear & Greed Index: {sentiment['fear_greed_index']}")</div>
-                </div>
-            </div>
-            
-            <div class="insights">
-                <h4>🎭 Key Insights:</h4>
-                <ul>
-                    <li>Overall market sentiment (BULLISH/BEARISH/NEUTRAL)</li>
-                    <li>Fear & Greed Index (0-100)</li>
-                    <li>Market trend direction</li>
-                    <li>Volatility index</li>
-                </ul>
-            </div>
-        </div>
-
-        <div class="step">
-            <h2><span class="step-number">4</span>AI Data Analyst - Market Conditions Assessment</h2>
-            <p>Get AI analysis of current market conditions for 3-week outlook.</p>
-            
-            <div class="tab-container">
-                <div class="tab-buttons">
-                    <button class="tab-button active" onclick="showTab(event, 'curl4')">cURL</button>
-                    <button class="tab-button" onclick="showTab(event, 'python4')">Python</button>
-                </div>
-                <div id="curl4" class="tab-content active">
-                    <div class="code-block">curl -X POST "http://localhost:8000/api/agents/data-analyst" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "query": "What are the current market conditions and outlook for the next 3 weeks?",
-    "symbols": ["VTI", "BNDX", "GSG"]
-  }'</div>
-                </div>
-                <div id="python4" class="tab-content">
-                    <div class="code-block">response = httpx.post("http://localhost:8000/api/agents/data-analyst", json={
-    "query": "What are the current market conditions and outlook for the next 3 weeks?",
-    "symbols": ["VTI", "BNDX", "GSG"]
-})
-analysis = response.json()["analysis"]
-print(f"Confidence: {analysis['confidence']}")
-print(f"Analysis: {analysis['analysis']}")</div>
-                </div>
-            </div>
-            
-            <div class="insights">
-                <h4>🤖 Key Insights:</h4>
-                <ul>
-                    <li>Market data interpretation</li>
-                    <li>Economic indicators analysis</li>
-                    <li>3-week market outlook</li>
-                    <li>Strategy adjustment recommendations</li>
-                </ul>
-            </div>
-        </div>
-
-        <div class="step">
-            <h2><span class="step-number">5</span>Analyze Your Current Portfolio</h2>
-            <p>Analyze portfolio with enhanced risk metrics and compliance.</p>
-            
-            <div class="tab-container">
-                <div class="tab-buttons">
-                    <button class="tab-button active" onclick="showTab(event, 'curl5')">cURL</button>
-                    <button class="tab-button" onclick="showTab(event, 'python5')">Python</button>
-                </div>
-                <div id="curl5" class="tab-content active">
-                    <div class="code-block">curl -X POST "http://localhost:8000/api/analyze-portfolio" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "portfolio": {"VTI": 50000.0, "BNDX": 30000.0, "GSG": 20000.0},
-    "total_value": 100000.0
-  }'</div>
-                </div>
-                <div id="python5" class="tab-content">
-                    <div class="code-block">response = httpx.post("http://localhost:8000/api/analyze-portfolio", json={
-    "portfolio": {"VTI": 50000.0, "BNDX": 30000.0, "GSG": 20000.0},
-    "total_value": 100000.0
-})
-analysis = response.json()["analysis"]
-print(f"Expected Return: {analysis['portfolio_metrics']['expected_return']:.1%}")
-print(f"Sharpe Ratio: {analysis['portfolio_metrics']['sharpe_ratio']:.2f}")</div>
-                </div>
-            </div>
-            
-            <div class="insights">
-                <h4>📊 Key Insights:</h4>
-                <ul>
-                    <li>Current vs target allocation drift</li>
-                    <li>Expected return and volatility</li>
-                    <li>Sharpe ratio (risk-adjusted returns)</li>
-                    <li>Compliance status and violations</li>
-                    <li>Specific rebalancing recommendations</li>
-                </ul>
-            </div>
-        </div>
-
-        <div class="best-practices">
-            <h3>🎯 Best Practices</h3>
-            <ul>
-                <li><strong>Parallel API Calls:</strong> Use asyncio.gather() to call multiple AI agents simultaneously</li>
-                <li><strong>Error Handling:</strong> Always check response status codes and handle API errors gracefully</li>
-                <li><strong>Rate Limiting:</strong> Be mindful of API rate limits, especially for external services</li>
-                <li><strong>Data Validation:</strong> Validate portfolio data and ensure total_value matches holdings</li>
-                <li><strong>Regular Updates:</strong> Run workflow weekly for 3-week strategies</li>
-            </ul>
-        </div>
-
-        <div class="outcomes">
-            <h3>🎉 Expected Outcomes</h3>
-            <ul>
-                <li>Comprehensive market assessment with real-time data</li>
-                <li>AI-powered insights from 3 specialized agents</li>
-                <li>Risk-adjusted portfolio recommendations</li>
-                <li>Specific rebalancing actions with priorities</li>
-                <li>Compliance validation and regulatory awareness</li>
-                <li>Performance expectations and risk metrics</li>
-            </ul>
-        </div>
-
-        <div style="text-align: center; margin: 2rem 0; padding: 2rem; background: white; border-radius: 8px;">
-            <h3>🚀 Ready to Get Started?</h3>
-            <p>Visit <a href="/docs" style="color: #667eea;">/docs</a> for interactive API documentation</p>
-            <p>Get the complete workflow data: <a href="/api/workflow-guide" style="color: #667eea;">/api/workflow-guide</a></p>
-        </div>
-
-        <script>
-            function showTab(evt, tabName) {
-                var i, tabcontent, tablinks;
-                
-                // Get the parent tab container
-                var container = evt.target.closest('.tab-container');
-                
-                // Hide all tab content in this container
-                tabcontent = container.getElementsByClassName("tab-content");
-                for (i = 0; i < tabcontent.length; i++) {
-                    tabcontent[i].classList.remove("active");
-                }
-                
-                // Remove active class from all tab buttons in this container
-                tablinks = container.getElementsByClassName("tab-button");
-                for (i = 0; i < tablinks.length; i++) {
-                    tablinks[i].classList.remove("active");
-                }
-                
-                // Show the selected tab and mark button as active
-                document.getElementById(tabName).classList.add("active");
-                evt.target.classList.add("active");
-            }
-        </script>
-    </body>
-    </html>
-    """
-    return HTMLResponse(content=html_content)
-
-# ============================================================================
-# STARTUP
-# ============================================================================
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize application on startup"""
-    logger.info("FinAgent Enhanced Simple API v1.6 starting up...")
-    logger.info("Strategy: Straight Arrow (60% VTI, 30% BNDX, 10% GSG)")
-    logger.info("Features: AI Agents, Risk Metrics, Compliance, Market Data")
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
