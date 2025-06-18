@@ -1412,6 +1412,197 @@ for i, disclosure in enumerate(disclosures[:3]):
         }
     }
 
+@app.get("/api/contracts")
+async def get_api_contracts():
+    """Get comprehensive API contracts and TypeScript interfaces"""
+    return {
+        "title": "FinAgent API Contracts & TypeScript Interfaces",
+        "description": "Complete API contracts with TypeScript interfaces for frontend integration",
+        "last_updated": datetime.now().isoformat(),
+        "version": "1.6.0",
+        "base_url": "https://finagentcur.onrender.com",
+        "contracts": {
+            "unified_strategy": {
+                "endpoint": "POST /api/unified-strategy",
+                "description": "Main endpoint that orchestrates all services to create actionable investment strategies",
+                "request_interface": """
+interface UnifiedStrategyRequest {
+  portfolio: { [symbol: string]: number };
+  total_value: number;
+  available_cash?: number;
+  time_horizon?: string;
+  risk_tolerance?: 'conservative' | 'moderate' | 'aggressive';
+  investment_goals?: string[];
+}""",
+                "response_interface": """
+interface UnifiedStrategyResponse {
+  status: 'success' | 'error';
+  strategy: {
+    strategy_id: string;
+    created_at: string;
+    time_horizon: string;
+    risk_tolerance: string;
+    trade_orders: TradeOrder[];
+    execution_guidelines: ExecutionGuidelines;
+    risk_warnings: string[];
+    performance_expectations: PerformanceExpectations;
+    next_review_date: string;
+  };
+  execution_ready: boolean;
+  api_version: string;
+  disclaimer: string;
+}""",
+                "example_request": {
+                    "portfolio": {"VTI": 50000.0, "BNDX": 30000.0, "GSG": 20000.0},
+                    "total_value": 100000.0,
+                    "available_cash": 10000.0,
+                    "time_horizon": "3 weeks",
+                    "risk_tolerance": "moderate",
+                    "investment_goals": ["rebalancing", "growth"]
+                }
+            },
+            "trade_order": {
+                "description": "Individual trade order structure",
+                "interface": """
+interface TradeOrder {
+  symbol: string;
+  action: 'BUY' | 'SELL' | 'HOLD';
+  order_type: 'MARKET' | 'LIMIT' | 'STOP';
+  quantity: number;
+  dollar_amount: number;
+  current_price: number;
+  target_price?: number;
+  priority: 'HIGH' | 'MEDIUM' | 'LOW';
+  reason: string;
+  expected_impact: string;
+  technical_context: string;
+  timing_suggestion: string;
+}"""
+            },
+            "execution_guidelines": {
+                "description": "Trade execution guidelines",
+                "interface": """
+interface ExecutionGuidelines {
+  execution_order: string;
+  timing: string;
+  market_hours: string;
+  monitoring: string;
+  high_priority_count: number;
+  suggested_sequence: string[];
+}"""
+            },
+            "portfolio_analysis": {
+                "endpoint": "POST /api/analyze-portfolio",
+                "description": "Analyze portfolio allocation and risk metrics",
+                "request_interface": """
+interface PortfolioRequest {
+  portfolio: { [symbol: string]: number };
+  total_value: number;
+}""",
+                "response_interface": """
+interface PortfolioAnalysisResponse {
+  analysis: {
+    strategy: string;
+    total_value: number;
+    current_weights: { [symbol: string]: number };
+    target_allocation: { [symbol: string]: number };
+    drift_analysis: { [symbol: string]: DriftAnalysis };
+    portfolio_metrics: PortfolioMetrics;
+    risk_assessment: RiskAssessment;
+    compliance: ComplianceStatus;
+    recommendations: Recommendation[];
+    timestamp: string;
+  };
+}"""
+            },
+            "market_data": {
+                "endpoint": "POST /api/market-data",
+                "description": "Get real-time market data with technical analysis",
+                "request_interface": """
+interface MarketDataRequest {
+  symbols: string[];
+}""",
+                "response_interface": """
+interface MarketDataResponse {
+  quotes: {
+    [symbol: string]: {
+      symbol: string;
+      price: number;
+      change: number;
+      change_percent: number;
+      volume: number;
+      high: number;
+      low: number;
+      technical_analysis: TechnicalAnalysis;
+      timestamp: string;
+    };
+  };
+  timestamp: string;
+}"""
+            },
+            "ai_agents": {
+                "endpoints": [
+                    "POST /api/agents/data-analyst",
+                    "POST /api/agents/risk-analyst", 
+                    "POST /api/agents/trading-analyst"
+                ],
+                "description": "AI-powered analysis agents",
+                "request_interface": """
+interface AIAnalysisRequest {
+  query: string;
+  symbols?: string[];
+  portfolio?: { [symbol: string]: number };
+  total_value?: number;
+  time_horizon?: string;
+  analysis_type?: string;
+}""",
+                "response_interface": """
+interface AIAnalysisResponse {
+  analysis: {
+    agent_type: 'data_analyst' | 'risk_analyst' | 'trading_analyst';
+    analysis: string;
+    confidence: number;
+    key_insights: string[];
+    recommendations: string[];
+    market_context: any;
+    timestamp: string;
+  };
+}"""
+            }
+        },
+        "error_responses": {
+            "description": "Standardized error response format",
+            "interface": """
+interface ErrorResponse {
+  status: 'error';
+  error: {
+    code: number;
+    message: string;
+    details?: string;
+    timestamp: string;
+  };
+}""",
+            "common_errors": {
+                "400": "Bad Request - Invalid input parameters",
+                "401": "Unauthorized - Authentication required",
+                "429": "Too Many Requests - Rate limit exceeded",
+                "500": "Internal Server Error - Server processing error"
+            }
+        },
+        "authentication": {
+            "description": "Currently no authentication required for demo purposes",
+            "note": "Production deployments should implement proper authentication"
+        },
+        "rate_limits": {
+            "description": "API rate limiting information",
+            "limits": {
+                "per_minute": 60,
+                "per_hour": 1000,
+                "burst": 10
+            }
+        }
+    }
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(
