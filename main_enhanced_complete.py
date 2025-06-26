@@ -20,6 +20,10 @@ import uvicorn
 from supabase import create_client, Client
 import httpx
 
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -46,7 +50,7 @@ app.add_middleware(
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 
 # Initialize Supabase client
 supabase: Client = None
@@ -70,10 +74,37 @@ class MarketDataRequest(BaseModel):
     """Market data request"""
     symbols: List[str] = Field(..., description="List of stock symbols")
 
+class TickerRequest(BaseModel):
+    """Single ticker request"""
+    symbol: str = Field(..., description="Stock ticker symbol", min_length=1, max_length=10)
+
+class TickerResponse(BaseModel):
+    """Single ticker response"""
+    symbol: str = Field(..., description="Stock ticker symbol")
+    price: float = Field(..., description="Current stock price")
+    change: float = Field(..., description="Price change")
+    change_percent: str = Field(..., description="Percentage change")
+    high: float = Field(..., description="Day's high price")
+    low: float = Field(..., description="Day's low price")
+    previous_close: float = Field(..., description="Previous day's closing price")
+    timestamp: str = Field(..., description="Response timestamp")
+    source: str = Field(..., description="Data source")
+
 class AIAnalysisRequest(BaseModel):
     """AI analysis request"""
     query: str = Field(..., description="User query")
     symbols: Optional[List[str]] = Field(default=[], description="Relevant symbols")
+
+class QuestionnaireRequest(BaseModel):
+    """Questionnaire analysis request"""
+    questionnaire: str = Field(..., description="Stringified questionnaire JSON")
+
+class QuestionnaireResponse(BaseModel):
+    """Questionnaire analysis response"""
+    risk_score: int = Field(..., description="Risk score from 1-5")
+    risk_level: str = Field(..., description="Risk level description")
+    portfolio_strategy_name: str = Field(..., description="Portfolio strategy name")
+    analysis_details: Dict[str, Any] = Field(..., description="Detailed analysis")
 
 class RiskAnalysisRequest(BaseModel):
     """Risk analysis request"""
@@ -87,13 +118,25 @@ class TradingAnalysisRequest(BaseModel):
     analysis_type: Optional[str] = Field(default="technical", description="Type of analysis")
 
 class UnifiedStrategyRequest(BaseModel):
-    """Unified investment strategy request"""
-    portfolio: Dict[str, float] = Field(..., description="Current portfolio holdings")
-    total_value: float = Field(..., gt=0, description="Total portfolio value")
-    available_cash: Optional[float] = Field(default=0.0, description="Available cash for investing")
-    time_horizon: Optional[str] = Field(default="3 weeks", description="Investment time horizon")
-    risk_tolerance: Optional[str] = Field(default="moderate", description="Risk tolerance: conservative, moderate, aggressive")
-    investment_goals: Optional[List[str]] = Field(default=["rebalancing"], description="Investment goals: rebalancing, growth, income, etc.")
+    """Enhanced unified investment strategy request with questionnaire integration"""
+    # Questionnaire-derived risk attributes (required)
+    risk_score: int = Field(..., ge=1, le=5, description="Risk score from questionnaire (1-5)")
+    risk_level: str = Field(..., description="Risk level from questionnaire")
+    portfolio_strategy_name: str = Field(..., description="Portfolio strategy name from questionnaire")
+    
+    # Investment parameters
+    investment_amount: float = Field(..., gt=0, description="Cash amount available for investment")
+    investment_restrictions: Optional[List[str]] = Field(default=[], description="Investment restrictions from questionnaire")
+    sector_preferences: Optional[List[str]] = Field(default=[], description="Preferred sectors from questionnaire")
+    
+    # Optional questionnaire context
+    time_horizon: Optional[str] = Field(default="5-10 years", description="Investment time horizon from questionnaire")
+    experience_level: Optional[str] = Field(default="Some experience", description="Investment experience level")
+    liquidity_needs: Optional[str] = Field(default="20-40% accessible", description="Liquidity requirements")
+    
+    # Current portfolio (optional for new investments)
+    current_portfolio: Optional[Dict[str, float]] = Field(default={}, description="Existing portfolio holdings")
+    current_portfolio_value: Optional[float] = Field(default=0.0, description="Current portfolio total value")
     
 class TradeOrder(BaseModel):
     """Individual trade order"""
@@ -296,62 +339,144 @@ class MarketDataService:
     """Enhanced market data service with sentiment analysis"""
     
     def __init__(self):
-        self.alpha_vantage_key = ALPHA_VANTAGE_API_KEY
+        self.finnhub_key = FINNHUB_API_KEY
     
     async def get_quotes(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
         """Get quotes for symbols with enhanced data"""
+        if not self.finnhub_key:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "Finnhub API key not configured",
+                    "message": "Real market data unavailable - no Finnhub API key configured",
+                    "symbols_requested": symbols
+                }
+            )
+        
         quotes = {}
+        errors = []
         
         for symbol in symbols:
-            try:
-                if self.alpha_vantage_key:
-                    quote = await self._fetch_quote_alpha_vantage(symbol)
-                    if quote:
-                        # Add technical indicators
-                        quote["technical_analysis"] = self._basic_technical_analysis(quote)
-                        quotes[symbol] = quote
-                        continue
+            quote = await self._fetch_quote_finnhub(symbol)
+            if quote:
+                # Add technical indicators
+                quote["technical_analysis"] = self._basic_technical_analysis(quote)
+                quotes[symbol] = quote
                 
-                # Enhanced mock data
-                quotes[symbol] = self._generate_enhanced_mock_data(symbol)
-                
-            except Exception as e:
-                logger.error(f"Failed to get quote for {symbol}: {e}")
-                quotes[symbol] = {"error": str(e)}
+                # Track errors for symbols that failed
+                if quote.get("source") == "mock" and "error" in quote:
+                    errors.append(f"{symbol}: {quote['error']}")
+            else:
+                error_msg = f"{symbol}: Unknown error fetching data"
+                errors.append(error_msg)
+                quotes[symbol] = {
+                    "symbol": symbol,
+                    "error": "Failed to fetch data",
+                    "source": "error",
+                    "timestamp": datetime.now().isoformat()
+                }
+        
+        # If all symbols failed, raise an error
+        if all(quote.get("source") in ["mock", "error"] for quote in quotes.values()):
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "All market data requests failed",
+                    "message": "Unable to fetch real market data for any requested symbols",
+                    "symbols_requested": symbols,
+                    "errors": errors
+                }
+            )
         
         return quotes
     
-    async def _fetch_quote_alpha_vantage(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Fetch quote from Alpha Vantage API"""
-        url = f"https://www.alphavantage.co/query"
+    async def _fetch_quote_finnhub(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Fetch quote from Finnhub API"""
+        url = "https://finnhub.io/api/v1/quote"
         params = {
-            "function": "GLOBAL_QUOTE",
             "symbol": symbol,
-            "apikey": self.alpha_vantage_key
+            "token": self.finnhub_key
         }
         
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, params=params) as response:
-                    data = await response.json()
-                    
-                    if "Global Quote" in data:
-                        quote_data = data["Global Quote"]
+                    if response.status == 200:
+                        data = await response.json()
+                        
+                        # Finnhub returns: {"c": current_price, "d": change, "dp": change_percent, "h": high, "l": low, "o": open, "pc": previous_close}
+                        if data.get("c") and data.get("c") > 0:  # 'c' is current price
+                            current_price = float(data.get("c", 0))
+                            change = float(data.get("d", 0))  # 'd' is change
+                            change_percent = f"{data.get('dp', 0):.2f}%"  # 'dp' is change percent
+                            high = float(data.get("h", current_price))  # 'h' is high
+                            low = float(data.get("l", current_price))   # 'l' is low
+                            previous_close = float(data.get("pc", current_price))  # 'pc' is previous close
+                            
+                            return {
+                                "symbol": symbol,
+                                "price": current_price,
+                                "change": change,
+                                "change_percent": change_percent,
+                                "volume": 0,  # Finnhub basic quote doesn't include volume
+                                "high": high,
+                                "low": low,
+                                "previous_close": previous_close,
+                                "timestamp": datetime.now().isoformat(),
+                                "source": "finnhub"
+                            }
+                        else:
+                            # Check for error in response
+                            error_msg = f"Finnhub returned invalid data for {symbol}"
+                            if "error" in data:
+                                error_msg = f"Finnhub error: {data['error']}"
+                            
+                            return {
+                                "symbol": symbol,
+                                "price": 0,
+                                "change": 0,
+                                "change_percent": "0%",
+                                "volume": 0,
+                                "high": 0,
+                                "low": 0,
+                                "timestamp": datetime.now().isoformat(),
+                                "source": "mock",
+                                "error": error_msg
+                            }
+                    else:
+                        error_msg = f"Finnhub API error: HTTP {response.status}"
+                        if response.status == 429:
+                            error_msg = "Finnhub API rate limit exceeded"
+                        elif response.status == 401:
+                            error_msg = "Finnhub API authentication failed - check API key"
+                        
                         return {
-                            "symbol": quote_data.get("01. Symbol"),
-                            "price": float(quote_data.get("05. Price", 0)),
-                            "change": float(quote_data.get("09. Change", 0)),
-                            "change_percent": quote_data.get("10. Change Percent", "0%"),
-                            "volume": int(quote_data.get("06. Volume", 0)),
-                            "high": float(quote_data.get("03. High", 0)),
-                            "low": float(quote_data.get("04. Low", 0)),
+                            "symbol": symbol,
+                            "price": 0,
+                            "change": 0,
+                            "change_percent": "0%",
+                            "volume": 0,
+                            "high": 0,
+                            "low": 0,
                             "timestamp": datetime.now().isoformat(),
-                            "source": "alpha_vantage"
+                            "source": "mock",
+                            "error": error_msg
                         }
+                        
         except Exception as e:
-            logger.error(f"Alpha Vantage API error for {symbol}: {e}")
-        
-        return None
+            logger.error(f"Finnhub API error for {symbol}: {e}")
+            return {
+                "symbol": symbol,
+                "price": 0,
+                "change": 0,
+                "change_percent": "0%",
+                "volume": 0,
+                "high": 0,
+                "low": 0,
+                "timestamp": datetime.now().isoformat(),
+                "source": "mock",
+                "error": f"Network error: {str(e)}"
+            }
     
     def _generate_enhanced_mock_data(self, symbol: str) -> Dict[str, Any]:
         """Generate enhanced mock data with technical analysis"""
@@ -394,17 +519,355 @@ class MarketDataService:
         }
     
     async def get_market_sentiment(self) -> Dict[str, Any]:
-        """Get overall market sentiment"""
+        """Get overall market sentiment using real market data"""
+        # Get VIX (volatility index) from Alpha Vantage
+        vix_data = await self._fetch_vix_data()
+        fear_greed_data = await self._fetch_fear_greed_index()
+        
+        # Check if we have real data
+        vix_is_real = vix_data.get("source") != "mock"
+        fear_greed_is_real = fear_greed_data.get("source") != "mock"
+        
+        if not vix_is_real and not fear_greed_is_real:
+            # No real data available - return error
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "Market sentiment data unavailable",
+                    "message": "Unable to fetch real market data from any source",
+                    "vix_error": vix_data.get("error", "No UVXY volatility data available"),
+                    "fear_greed_error": fear_greed_data.get("error", "No market indicators available"),
+                    "timestamp": datetime.now().isoformat()
+                }
+            )
+        
+        # Calculate overall sentiment based on available real data
+        overall_sentiment = self._calculate_overall_sentiment(vix_data, fear_greed_data)
+        market_trend = self._determine_market_trend(vix_data, fear_greed_data)
+        
         return {
-            "overall_sentiment": "NEUTRAL",
-            "fear_greed_index": 50,
-            "market_trend": "SIDEWAYS",
-            "volatility_index": 20,
+            "overall_sentiment": overall_sentiment,
+            "fear_greed_index": fear_greed_data.get("value", 50),
+            "fear_greed_text": fear_greed_data.get("text", "Neutral"),
+            "market_trend": market_trend,
+            "volatility_index": vix_data.get("price", 20),
+            "vix_change": vix_data.get("change", 0),
+            "data_sources": {
+                "vix_source": vix_data.get("source", "unavailable"),
+                "fear_greed_source": fear_greed_data.get("source", "unavailable")
+            },
+            "data_quality": {
+                "vix_available": vix_is_real,
+                "fear_greed_available": fear_greed_is_real,
+                "overall_quality": "partial" if (vix_is_real != fear_greed_is_real) else "complete"
+            },
             "timestamp": datetime.now().isoformat(),
-            "source": "mock"
+            "source": "real_market_data"
         }
+    
+    async def _fetch_vix_data(self) -> Dict[str, Any]:
+        """Fetch volatility data using VIX directly from Finnhub"""
+        if not self.finnhub_key:
+            return {"price": 20, "change": 0, "source": "mock", "error": "No Finnhub API key configured"}
+            
+        try:
+            # Try to get VIX directly from Finnhub
+            vix_quote = await self._fetch_quote_finnhub("^VIX")
+            if vix_quote and vix_quote.get("source") == "finnhub":
+                return {
+                    "price": vix_quote.get("price", 20),
+                    "change": vix_quote.get("change", 0),
+                    "change_percent": vix_quote.get("change_percent", "0%"),
+                    "source": "finnhub_vix",
+                    "high": vix_quote.get("high"),
+                    "low": vix_quote.get("low")
+                }
+            else:
+                # Fallback to UVXY as volatility proxy if VIX not available
+                uvxy_quote = await self._fetch_quote_finnhub("UVXY")
+                if uvxy_quote and uvxy_quote.get("source") == "finnhub":
+                    uvxy_price = uvxy_quote.get("price", 10)
+                    uvxy_change = uvxy_quote.get("change", 0)
+                    
+                    # Convert UVXY to approximate VIX equivalent
+                    # UVXY typically trades 10-30, VIX typically 10-80
+                    # Rough conversion: VIX ≈ UVXY * 1.5 + 5
+                    estimated_vix = (uvxy_price * 1.5) + 5
+                    estimated_vix_change = uvxy_change * 1.5
+                    
+                    return {
+                        "price": round(estimated_vix, 2),
+                        "change": round(estimated_vix_change, 2),
+                        "change_percent": uvxy_quote.get("change_percent", "0%"),
+                        "source": "finnhub_uvxy_proxy",
+                        "raw_uvxy_price": uvxy_price
+                    }
+                else:
+                    error_msg = uvxy_quote.get("error", "Failed to get volatility data") if uvxy_quote else "No volatility data available"
+                    return {"price": 20, "change": 0, "source": "mock", "error": error_msg}
+                        
+        except Exception as e:
+            logger.error(f"Failed to fetch volatility data: {e}")
+            return {"price": 20, "change": 0, "source": "mock", "error": f"Network error: {str(e)}"}
+    
+    async def _fetch_fear_greed_index(self) -> Dict[str, Any]:
+        """Calculate Fear & Greed Index based on market indicators"""
+        try:
+            # Use multiple market indicators to calculate our own Fear & Greed Index
+            # Get key market data points
+            market_indicators = await self._get_market_indicators_for_sentiment()
+            
+            if market_indicators.get("source") != "mock":
+                # Calculate composite fear/greed score
+                fear_greed_value = self._calculate_fear_greed_score(market_indicators)
+                
+                # Determine text classification
+                if fear_greed_value <= 25:
+                    text = "Extreme Fear"
+                elif fear_greed_value <= 45:
+                    text = "Fear"
+                elif fear_greed_value <= 55:
+                    text = "Neutral"
+                elif fear_greed_value <= 75:
+                    text = "Greed"
+                else:
+                    text = "Extreme Greed"
+                    
+                return {
+                    "value": fear_greed_value,
+                    "text": text,
+                    "components": market_indicators.get("components", {}),
+                    "source": "calculated_from_market_data"
+                }
+                            
+        except Exception as e:
+            logger.error(f"Failed to calculate Fear & Greed Index: {e}")
+            
+        return {"value": 50, "text": "Neutral", "source": "mock"}
+    
+    async def _get_market_indicators_for_sentiment(self) -> Dict[str, Any]:
+        """Get key market indicators for sentiment calculation"""
+        try:
+            # Get data for key market indicators
+            symbols = ["SPY", "QQQ", "VTI"]  # Major market ETFs
+            market_data = {}
+            errors = []
+            
+            for symbol in symbols:
+                quote = await self._fetch_quote_finnhub(symbol)
+                if quote and quote.get("source") != "mock":
+                    market_data[symbol] = quote
+                else:
+                    error_msg = f"Failed to get {symbol} data"
+                    if quote and "error" in quote:
+                        error_msg = f"{symbol}: {quote['error']}"
+                    errors.append(error_msg)
+            
+            if market_data:
+                return {
+                    "market_data": market_data,
+                    "source": "finnhub",
+                    "components": self._extract_sentiment_components(market_data),
+                    "partial_errors": errors if errors else None
+                }
+            else:
+                return {
+                    "source": "mock", 
+                    "error": f"No market data available for any symbols: {'; '.join(errors)}"
+                }
+                
+        except Exception as e:
+            logger.error(f"Failed to get market indicators: {e}")
+            return {"source": "mock", "error": f"Network error: {str(e)}"}
+    
+    def _extract_sentiment_components(self, market_data: Dict) -> Dict[str, Any]:
+        """Extract sentiment components from market data"""
+        components = {}
+        
+        for symbol, data in market_data.items():
+            change_percent_str = data.get("change_percent", "0%")
+            # Extract numeric value from percentage string like "+1.5%" or "-0.8%"
+            try:
+                change_percent = float(change_percent_str.replace("%", "").replace("+", ""))
+                components[f"{symbol}_change_percent"] = change_percent
+            except:
+                components[f"{symbol}_change_percent"] = 0
+                
+        return components
+    
+    def _calculate_fear_greed_score(self, market_indicators: Dict) -> int:
+        """Calculate Fear & Greed score from market indicators"""
+        components = market_indicators.get("components", {})
+        
+        # Start with neutral (50)
+        score = 50
+        
+        # Market momentum component (based on major ETF performance)
+        spy_change = components.get("SPY_change_percent", 0)
+        qqq_change = components.get("QQQ_change_percent", 0) 
+        vti_change = components.get("VTI_change_percent", 0)
+        
+        # Average market performance
+        avg_market_change = (spy_change + qqq_change + vti_change) / 3
+        
+        # Convert market performance to sentiment score
+        # Strong positive performance -> Greed (higher score)
+        # Strong negative performance -> Fear (lower score)
+        if avg_market_change > 2:
+            score += 25  # Strong positive = greed
+        elif avg_market_change > 1:
+            score += 15  # Moderate positive = mild greed
+        elif avg_market_change > 0:
+            score += 5   # Slight positive = mild optimism
+        elif avg_market_change > -1:
+            score -= 5   # Slight negative = mild pessimism
+        elif avg_market_change > -2:
+            score -= 15  # Moderate negative = fear
+        else:
+            score -= 25  # Strong negative = extreme fear
+            
+        # Ensure score stays within 0-100 range
+        return max(0, min(100, score))
+    
+    def _calculate_overall_sentiment(self, vix_data: Dict, fear_greed_data: Dict) -> str:
+        """Calculate overall market sentiment based on VIX and Fear & Greed Index"""
+        vix_price = vix_data.get("price", 20)
+        fear_greed = fear_greed_data.get("value", 50)
+        
+        # VIX interpretation (lower = less fear)
+        # VIX < 15: Low volatility/complacency
+        # VIX 15-25: Normal volatility  
+        # VIX > 25: High volatility/fear
+        
+        sentiment_score = 0
+        
+        # VIX component (40% weight)
+        if vix_price < 15:
+            sentiment_score += 20  # Bullish (low fear)
+        elif vix_price < 25:
+            sentiment_score += 0   # Neutral
+        else:
+            sentiment_score -= 20  # Bearish (high fear)
+            
+        # Fear & Greed component (60% weight)
+        if fear_greed > 55:
+            sentiment_score += 30  # Bullish (greed)
+        elif fear_greed > 45:
+            sentiment_score += 0   # Neutral
+        else:
+            sentiment_score -= 30  # Bearish (fear)
+            
+        # Determine overall sentiment
+        if sentiment_score > 15:
+            return "BULLISH"
+        elif sentiment_score < -15:
+            return "BEARISH"
+        else:
+            return "NEUTRAL"
+    
+    def _determine_market_trend(self, vix_data: Dict, fear_greed_data: Dict) -> str:
+        """Determine market trend based on volatility and sentiment"""
+        vix_price = vix_data.get("price", 20)
+        vix_change = vix_data.get("change", 0)
+        fear_greed = fear_greed_data.get("value", 50)
+        
+        # Rising VIX = increasing fear/uncertainty
+        # Falling VIX = decreasing fear
+        # Fear & Greed extremes can indicate trend reversals
+        
+        if vix_change > 2 and vix_price > 25:
+            return "VOLATILE_DOWN"  # High volatility, rising fear
+        elif vix_change < -2 and fear_greed > 60:
+            return "TRENDING_UP"    # Decreasing fear, greed rising
+        elif fear_greed > 75:
+            return "OVERHEATED"     # Extreme greed - caution
+        elif fear_greed < 25:
+            return "OVERSOLD"       # Extreme fear - potential opportunity
+        elif vix_price > 30:
+            return "HIGH_VOLATILITY"
+        elif vix_price < 15:
+            return "LOW_VOLATILITY"
+        else:
+            return "SIDEWAYS"
 
 # Continue in next part... # ============================================================================
+# INVESTMENT PROFILE TEMPLATES
+# ============================================================================
+
+INVESTMENT_PROFILE_TEMPLATES = {
+    1: {
+        "name": "Ultra Conservative Capital Preservation",
+        "core_strategy": "Capital Preservation + Inflation Hedge",
+        "base_allocation": {"SGOV": 50, "VPU": 30, "TIPS": 20},
+        "risk_controls": {"RealYieldTracking": True, "MaxDrawdown": "<3%", "TreasuryRoll": "6mo"},
+        "risk_level": "Very Low",
+        "description": "Ultra-conservative approach focused on capital preservation and inflation protection",
+        "asset_allocation": "50% Short-term Treasury, 30% Utilities, 20% Inflation-Protected Bonds",
+        "investment_focus": "Capital preservation with inflation hedge protection",
+        "recommended_products": ["Short-term Treasury ETFs (SGOV)", "Utilities ETF (VPU)", "TIPS", "High-grade bonds"],
+        "time_horizon_fit": "Short to medium term with capital preservation priority",
+        "volatility_expectation": "<3% annual volatility",
+        "expected_return": "3-5% annually (inflation-adjusted)"
+    },
+    2: {
+        "name": "Conservative Balanced Growth", 
+        "core_strategy": "Diversified Three-Fund Style",
+        "base_allocation": {"VTI": 60, "BNDX": 30, "GSG": 10},
+        "risk_controls": {"Sharpe": ">0.5", "VolatilityCap": "<12%", "TaxLossHarvesting": True},
+        "risk_level": "Low",
+        "description": "Classic diversified approach with balanced growth and income",
+        "asset_allocation": "60% Total Stock Market, 30% International Bonds, 10% Commodities",
+        "investment_focus": "Balanced growth and income with global diversification",
+        "recommended_products": ["Total Stock Market ETF (VTI)", "International Bond ETF (BNDX)", "Commodities ETF (GSG)"],
+        "time_horizon_fit": "Medium to long term with moderate risk tolerance",
+        "volatility_expectation": "10-12% annual volatility",
+        "expected_return": "6-8% annually over long term"
+    },
+    3: {
+        "name": "Moderate Growth with Value Focus",
+        "core_strategy": "Graham-Buffett Value + Momentum Tilt",
+        "base_allocation": {"VTI": 70, "VTV": 15, "MTUM": 10, "VMOT": 5},
+        "risk_controls": {"P/E": "<20", "Dividend": ">2%", "Drift Rebalance": "5%"},
+        "risk_level": "Moderate",
+        "description": "Value-focused approach with momentum tilt and selective sector exposure",
+        "asset_allocation": "70% Total Market, 15% Value ETFs, 10% Momentum, 5% Cash Buffer",
+        "investment_focus": "Value investing with momentum signals and tactical allocation",
+        "recommended_products": ["Total Market ETF (VTI)", "Value ETFs (VTV)", "Momentum ETFs (MTUM)", "Dividend ETFs"],
+        "time_horizon_fit": "Long term with active management overlay",
+        "volatility_expectation": "12-15% annual volatility", 
+        "expected_return": "7-10% annually with value tilt"
+    },
+    4: {
+        "name": "Aggressive Growth with Trend Following",
+        "core_strategy": "Social Sentiment Mirroring + Growth Tilt",
+        "base_allocation": {"QQQ": 40, "VUG": 30, "ARKK": 20, "VMOT": 10},
+        "risk_controls": {"DelayTrades": "24h", "SocialSentiment": True, "BuzzVolumeMonitor": True},
+        "risk_level": "High", 
+        "description": "Trend-following approach using growth stocks and innovation themes",
+        "asset_allocation": "40% NASDAQ, 30% Growth ETFs, 20% Innovation ETFs, 10% Momentum",
+        "investment_focus": "Growth-oriented with trend following and innovation exposure",
+        "recommended_products": ["NASDAQ ETF (QQQ)", "Growth ETF (VUG)", "Innovation ETF (ARKK)", "Momentum ETFs"],
+        "time_horizon_fit": "Medium to long term with active trend monitoring",
+        "volatility_expectation": "15-20% annual volatility",
+        "expected_return": "8-12% annually with higher variance"
+    },
+    5: {
+        "name": "Maximum Growth High-Risk Portfolio",
+        "core_strategy": "Barbell: Stability + High Volatility Growth", 
+        "base_allocation": {"BND": 30, "TQQQ": 25, "SOXL": 20, "ARKK": 15, "SPXL": 10},
+        "risk_controls": {"VolatilityCap": "<40%", "AutoSellDrop": "15%", "DrawdownCap": "<25%"},
+        "risk_level": "Very High",
+        "description": "High-risk strategy combining stable bonds with leveraged growth exposure",
+        "asset_allocation": "30% Bonds, 25% 3x Tech, 20% 3x Semiconductors, 15% Innovation, 10% 3x S&P",
+        "investment_focus": "Maximum growth potential with leveraged exposure and sector concentration",
+        "recommended_products": ["Bond ETF (BND)", "3x Leveraged Tech (TQQQ)", "3x Semiconductors (SOXL)", "Innovation (ARKK)"],
+        "time_horizon_fit": "Long term with high risk tolerance and volatility acceptance",
+        "volatility_expectation": "25-40% annual volatility",
+        "expected_return": "10-15% annually with high risk/reward"
+    }
+}
+
+# ============================================================================
 # AI AGENTS
 # ============================================================================
 
@@ -416,6 +879,16 @@ class AIAgentService:
     
     async def data_analyst(self, query: str, symbols: List[str] = None) -> Dict[str, Any]:
         """Data analyst agent - market data and fundamental analysis"""
+        
+        if not self.openai_key:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "OpenAI API key not configured",
+                    "message": "AI analysis unavailable - no OpenAI API key configured",
+                    "agent_type": "data_analyst"
+                }
+            )
         
         context = f"""You are a financial data analyst AI. Analyze the following query with focus on:
         - Market data interpretation
@@ -429,19 +902,31 @@ class AIAgentService:
         Provide educational analysis focusing on the Straight Arrow strategy (60% VTI, 30% BNDX, 10% GSG).
         Include appropriate disclaimers."""
         
-        response = await self._call_openai(context, "data_analyst") if self.openai_key else self._mock_data_analyst(query)
+        # This will raise HTTPException on error instead of falling back
+        response = await self._call_openai(context, "data_analyst")
         
         return {
             "agent": "data_analyst",
             "query": query,
             "analysis": response,
             "symbols": symbols or [],
-            "confidence": 0.85 if self.openai_key else 0.7,
-            "timestamp": datetime.now().isoformat()
+            "confidence": 0.85,
+            "timestamp": datetime.now().isoformat(),
+            "source": "openai_gpt3.5"
         }
     
     async def risk_analyst(self, portfolio: Dict[str, float], total_value: float, time_horizon: str = "Long Term") -> Dict[str, Any]:
         """Risk analyst agent - risk assessment and management"""
+        
+        if not self.openai_key:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "OpenAI API key not configured",
+                    "message": "AI risk analysis unavailable - no OpenAI API key configured",
+                    "agent_type": "risk_analyst"
+                }
+            )
         
         # Calculate portfolio weights
         weights = {symbol: value / total_value for symbol, value in portfolio.items()}
@@ -461,7 +946,8 @@ class AIAgentService:
         Compare against Straight Arrow strategy (60% VTI, 30% BNDX, 10% GSG).
         Include appropriate risk disclaimers."""
         
-        response = await self._call_openai(context, "risk_analyst") if self.openai_key else self._mock_risk_analyst(weights)
+        # This will raise HTTPException on error instead of falling back
+        response = await self._call_openai(context, "risk_analyst")
         
         return {
             "agent": "risk_analyst",
@@ -469,12 +955,23 @@ class AIAgentService:
             "total_value": total_value,
             "time_horizon": time_horizon,
             "analysis": response,
-            "confidence": 0.80 if self.openai_key else 0.7,
-            "timestamp": datetime.now().isoformat()
+            "confidence": 0.80,
+            "timestamp": datetime.now().isoformat(),
+            "source": "openai_gpt3.5"
         }
     
     async def trading_analyst(self, symbols: List[str], analysis_type: str = "technical") -> Dict[str, Any]:
         """Trading analyst agent - technical analysis and trading signals"""
+        
+        if not self.openai_key:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "OpenAI API key not configured",
+                    "message": "AI trading analysis unavailable - no OpenAI API key configured",
+                    "agent_type": "trading_analyst"
+                }
+            )
         
         context = f"""You are a trading analyst AI. Provide {analysis_type} analysis for:
         
@@ -491,15 +988,17 @@ class AIAgentService:
         Emphasize buy-and-hold approach with quarterly rebalancing.
         Include trading disclaimers."""
         
-        response = await self._call_openai(context, "trading_analyst") if self.openai_key else self._mock_trading_analyst(symbols)
+        # This will raise HTTPException on error instead of falling back
+        response = await self._call_openai(context, "trading_analyst")
         
         return {
             "agent": "trading_analyst",
             "symbols": symbols,
             "analysis_type": analysis_type,
             "analysis": response,
-            "confidence": 0.75 if self.openai_key else 0.6,
-            "timestamp": datetime.now().isoformat()
+            "confidence": 0.75,
+            "timestamp": datetime.now().isoformat(),
+            "source": "openai_gpt3.5"
         }
     
     async def _call_openai(self, prompt: str, agent_type: str) -> str:
@@ -523,13 +1022,39 @@ class AIAgentService:
                 if response.status_code == 200:
                     data = response.json()
                     return data["choices"][0]["message"]["content"].strip()
+                elif response.status_code == 429:
+                    raise HTTPException(
+                        status_code=429,
+                        detail={
+                            "error": "OpenAI API rate limit exceeded",
+                            "message": "Too many requests to OpenAI API. Please try again later.",
+                            "agent_type": agent_type,
+                            "retry_after": response.headers.get("retry-after", "60 seconds")
+                        }
+                    )
                 else:
-                    logger.error(f"OpenAI API error: {response.status_code}")
-                    return self._get_mock_response(agent_type, prompt)
+                    response_text = await response.aread() if hasattr(response, 'aread') else str(response.content)
+                    raise HTTPException(
+                        status_code=502,
+                        detail={
+                            "error": f"OpenAI API error: HTTP {response.status_code}",
+                            "message": "Failed to get AI analysis from OpenAI",
+                            "agent_type": agent_type,
+                            "api_response": response_text[:200] if response_text else "No response content"
+                        }
+                    )
                     
+        except HTTPException:
+            raise  # Re-raise HTTP exceptions
         except Exception as e:
-            logger.error(f"OpenAI API error: {e}")
-            return self._get_mock_response(agent_type, prompt)
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "OpenAI API connection failed",
+                    "message": f"Network error connecting to OpenAI: {str(e)}",
+                    "agent_type": agent_type
+                }
+            )
     
     def _mock_data_analyst(self, query: str) -> str:
         """Mock data analyst response"""
@@ -616,343 +1141,834 @@ DISCLAIMER: Technical analysis is educational. Past patterns don't predict futur
             return self._mock_trading_analyst(["VTI", "BNDX", "GSG"])
         else:
             return "Analysis not available. Please try again later."
+    
+    async def analyze_questionnaire(self, questionnaire_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Analyze questionnaire and determine risk profile and portfolio strategy"""
+        try:
+            # Calculate risk score based on questionnaire responses
+            risk_score = self._calculate_risk_score(questionnaire_data)
+            
+            # Determine risk level
+            risk_level = self._determine_risk_level(risk_score)
+            
+            # Generate portfolio strategy name
+            portfolio_strategy_name = self._generate_portfolio_strategy_name(risk_score, risk_level)
+            
+            # Get detailed analysis from AI if available
+            context = f"""
+            Analyze this investment questionnaire to provide detailed insights:
+            
+            Investment Goal: {questionnaire_data.get('investment_goal', 'Not specified')}
+            Time Horizon: {questionnaire_data.get('time_horizon', 'Not specified')}
+            Risk Tolerance: {questionnaire_data.get('risk_tolerance', 'Not specified')}
+            Experience Level: {questionnaire_data.get('experience_level', 'Not specified')}
+            Income Level: {questionnaire_data.get('income_level', 'Not specified')}
+            Net Worth: {questionnaire_data.get('net_worth', 'Not specified')}
+            Liquidity Needs: {questionnaire_data.get('liquidity_needs', 'Not specified')}
+            
+            Calculated Risk Score: {risk_score}/5
+            Risk Level: {risk_level}
+            
+            Provide detailed analysis explaining why this risk profile is appropriate and what investment strategy considerations apply.
+            """
+            
+            # Get AI analysis if OpenAI is available, otherwise provide basic analysis
+            if self.openai_key:
+                try:
+                    analysis_details = await self._call_openai(context, "questionnaire_analyst")
+                except HTTPException as e:
+                    # For questionnaire analysis, we can fall back to basic analysis since 
+                    # the core risk scoring doesn't depend on AI
+                    analysis_details = f"AI analysis unavailable ({e.detail.get('error', 'Unknown error')}). Risk score calculation completed using questionnaire responses."
+            else:
+                analysis_details = "AI analysis unavailable - no OpenAI API key configured. Risk score calculated from questionnaire responses."
+            
+            return {
+                "risk_score": risk_score,
+                "risk_level": risk_level,
+                "portfolio_strategy_name": portfolio_strategy_name,
+                "analysis_details": {
+                    "detailed_analysis": analysis_details,
+                    "questionnaire_breakdown": self._breakdown_questionnaire_factors(questionnaire_data),
+                    "investment_recommendations": self._generate_investment_recommendations(risk_score, questionnaire_data),
+                    "strategy_rationale": self._generate_strategy_rationale(risk_score, risk_level, questionnaire_data)
+                },
+                "confidence": 0.85 if self.openai_key else 0.7,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            logger.error(f"Questionnaire analysis error: {e}")
+            default_template = INVESTMENT_PROFILE_TEMPLATES[3]  # Individualist as default
+            return {
+                "risk_score": 3,  # Default moderate risk
+                "risk_level": default_template["risk_level"],
+                "portfolio_strategy_name": default_template["name"],
+                "analysis_details": {
+                    "error": str(e),
+                    "detailed_analysis": f"Unable to complete full analysis due to error. Default {default_template['name']} profile assigned.",
+                    "investment_recommendations": self._generate_investment_recommendations(3, {}),
+                    "strategy_rationale": f"Default assignment to {default_template['name']} due to analysis error."
+                },
+                "confidence": 0.3,
+                "timestamp": datetime.now().isoformat()
+            }
+    
+    def _calculate_risk_score(self, questionnaire_data: Dict[str, Any]) -> int:
+        """Calculate risk score from 1-5 based on questionnaire responses"""
+        score_components = []
+        
+        # 1. Investment Goal (20% weight)
+        goal = questionnaire_data.get('investment_goal', '').lower().replace('_', ' ')
+        if 'preserve capital' in goal or 'capital preservation' in goal:
+            score_components.append(1)
+        elif 'income' in goal:
+            score_components.append(2)
+        elif 'major purchase' in goal or 'balanced growth' in goal:
+            score_components.append(3)
+        elif 'retirement' in goal:
+            score_components.append(3)
+        elif 'wealth accumulation' in goal:
+            score_components.append(4)
+        else:
+            score_components.append(3)  # Default
+        
+        # 2. Time Horizon (25% weight)
+        horizon = questionnaire_data.get('time_horizon', '').lower().replace('_', ' ')
+        if 'less than 1' in horizon or 'under 1' in horizon:
+            score_components.append(1)
+        elif '1 to 3' in horizon or '1-3' in horizon:
+            score_components.append(2)
+        elif '3 to 5' in horizon or '3-5' in horizon:
+            score_components.append(3)
+        elif '5 to 10' in horizon or '5-10' in horizon:
+            score_components.append(4)
+        elif 'more than 10' in horizon or '10+' in horizon or 'over 10' in horizon:
+            score_components.append(5)
+        else:
+            score_components.append(3)  # Default
+        
+        # 3. Risk Tolerance - Portfolio Decline Reaction (30% weight)
+        risk_tolerance = questionnaire_data.get('risk_tolerance', '').lower().replace('_', ' ')
+        if 'sell everything' in risk_tolerance:
+            score_components.append(1)
+        elif 'accept small losses' in risk_tolerance or 'small losses' in risk_tolerance:
+            score_components.append(2)
+        elif 'moderate losses' in risk_tolerance or 'hold and wait' in risk_tolerance:
+            score_components.append(3)
+        elif 'accept significant losses' in risk_tolerance or 'buy more' in risk_tolerance:
+            score_components.append(4)
+        elif 'excited about opportunity' in risk_tolerance or 'excited about' in risk_tolerance:
+            score_components.append(5)
+        else:
+            score_components.append(3)  # Default
+        
+        # 4. Experience Level (15% weight)
+        experience = questionnaire_data.get('experience_level', '').lower().replace('_', ' ')
+        if 'no experience' in experience or 'no investment' in experience:
+            score_components.append(1)
+        elif 'basic' in experience:
+            score_components.append(2)
+        elif 'some experience' in experience:
+            score_components.append(3)
+        elif 'experienced' in experience:
+            score_components.append(4)
+        elif 'professional' in experience:
+            score_components.append(5)
+        else:
+            score_components.append(3)  # Default
+        
+        # 5. Liquidity Needs (10% weight) - inverse relationship to risk
+        liquidity = questionnaire_data.get('liquidity_needs', '').lower().replace('_', ' ')
+        if 'more than 60' in liquidity or '60+' in liquidity:
+            score_components.append(1)
+        elif '40 to 60' in liquidity or '40-60' in liquidity:
+            score_components.append(2)
+        elif '20 to 40' in liquidity or '20-40' in liquidity:
+            score_components.append(3)
+        elif '10 to 20' in liquidity or '10-20' in liquidity:
+            score_components.append(4)
+        elif 'less than 20' in liquidity or 'none accessible' in liquidity or 'none' in liquidity:
+            score_components.append(5)
+        else:
+            score_components.append(3)  # Default
+        
+        # Calculate weighted average with weights [0.2, 0.25, 0.3, 0.15, 0.1]
+        weights = [0.2, 0.25, 0.3, 0.15, 0.1]
+        if len(score_components) >= 5:
+            weighted_score = sum(score * weight for score, weight in zip(score_components[:5], weights))
+        else:
+            # Fallback to simple average
+            weighted_score = sum(score_components) / len(score_components) if score_components else 3
+        
+        # Round to nearest integer and ensure in range 1-5
+        final_score = max(1, min(5, round(weighted_score)))
+        return final_score
+    
+    def _determine_risk_level(self, risk_score: int) -> str:
+        """Map risk score to risk level description from investment profile templates"""
+        template = INVESTMENT_PROFILE_TEMPLATES.get(risk_score, INVESTMENT_PROFILE_TEMPLATES[3])
+        return template["risk_level"]
+    
+    def _generate_portfolio_strategy_name(self, risk_score: int, risk_level: str) -> str:
+        """Generate portfolio strategy name from investment profile templates"""
+        template = INVESTMENT_PROFILE_TEMPLATES.get(risk_score, INVESTMENT_PROFILE_TEMPLATES[3])
+        return template["name"]
+    
+    def _breakdown_questionnaire_factors(self, questionnaire_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Provide breakdown of key questionnaire factors"""
+        return {
+            "primary_factors": {
+                "investment_goal": questionnaire_data.get('investment_goal', 'Not specified'),
+                "time_horizon": questionnaire_data.get('time_horizon', 'Not specified'),
+                "risk_tolerance": questionnaire_data.get('risk_tolerance', 'Not specified')
+            },
+            "supporting_factors": {
+                "experience_level": questionnaire_data.get('experience_level', 'Not specified'),
+                "income_level": questionnaire_data.get('income_level', 'Not specified'),
+                "net_worth": questionnaire_data.get('net_worth', 'Not specified'),
+                "liquidity_needs": questionnaire_data.get('liquidity_needs', 'Not specified')
+            },
+            "preferences": {
+                "sector_preferences": questionnaire_data.get('sector_preferences', []),
+                "investment_restrictions": questionnaire_data.get('investment_restrictions', []),
+                "market_insights": questionnaire_data.get('market_insights', 'Not specified')
+            }
+        }
+    
+    def _generate_investment_recommendations(self, risk_score: int, questionnaire_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate specific investment recommendations based on risk score from templates"""
+        template = INVESTMENT_PROFILE_TEMPLATES.get(risk_score, INVESTMENT_PROFILE_TEMPLATES[3])
+        
+        return {
+            "profile_name": template["name"],
+            "core_strategy": template["core_strategy"], 
+            "asset_allocation": template["asset_allocation"],
+            "base_allocation": template["base_allocation"],
+            "investment_focus": template["investment_focus"],
+            "recommended_products": template["recommended_products"],
+            "time_horizon_fit": template["time_horizon_fit"],
+            "volatility_expectation": template["volatility_expectation"],
+            "expected_return": template["expected_return"],
+            "risk_controls": template["risk_controls"],
+            "description": template["description"]
+        }
+    
+    def _generate_strategy_rationale(self, risk_score: int, risk_level: str, questionnaire_data: Dict[str, Any]) -> str:
+        """Generate explanation of why this strategy is appropriate using template data"""
+        template = INVESTMENT_PROFILE_TEMPLATES.get(risk_score, INVESTMENT_PROFILE_TEMPLATES[3])
+        time_horizon = questionnaire_data.get('time_horizon', '')
+        goal = questionnaire_data.get('investment_goal', '')
+        
+        rationale = f"Based on your {risk_level.lower()} risk profile (score {risk_score}/5), we recommend the '{template['name']}' strategy. "
+        rationale += f"{template['description']} "
+        
+        rationale += f"This {template['core_strategy']} approach is designed to "
+        
+        if 'preservation' in goal.lower():
+            rationale += "prioritize capital preservation while providing inflation-adjusted returns."
+        elif 'income' in goal.lower():
+            rationale += "generate regular income while maintaining growth potential."
+        elif 'accumulation' in goal.lower():
+            rationale += "build long-term wealth through strategic asset allocation."
+        else:
+            rationale += "balance growth potential with appropriate risk management."
+        
+        # Add time horizon context
+        if '10+' in time_horizon:
+            rationale += " Your long-term time horizon allows for potential market volatility recovery and compound growth."
+        elif '5-10' in time_horizon:
+            rationale += " Your medium to long-term horizon provides flexibility for market cycles."
+        else:
+            rationale += " Your shorter time horizon emphasizes the importance of risk management and liquidity."
+        
+        # Add strategy-specific insights
+        rationale += f" Expected volatility: {template['volatility_expectation']} with anticipated returns of {template['expected_return']}."
+        
+        return rationale
+    
+    def _mock_questionnaire_analysis(self, questionnaire_data: Dict[str, Any], risk_score: int, risk_level: str) -> str:
+        """Mock detailed questionnaire analysis using investment profile templates"""
+        template = INVESTMENT_PROFILE_TEMPLATES.get(risk_score, INVESTMENT_PROFILE_TEMPLATES[3])
+        
+        return f"""Based on your questionnaire responses, you have been assigned a {risk_level.lower()} risk profile with a score of {risk_score}/5.
+
+INVESTMENT PROFILE: {template['name']}
+Strategy: {template['core_strategy']}
+
+Key factors in this assessment:
+- Investment time horizon: {questionnaire_data.get('time_horizon', 'Not specified')}
+- Risk tolerance for market volatility: {questionnaire_data.get('risk_tolerance', 'Not specified')}
+- Investment experience level: {questionnaire_data.get('experience_level', 'Not specified')}
+- Primary investment goal: {questionnaire_data.get('investment_goal', 'Not specified')}
+
+RECOMMENDED PORTFOLIO ALLOCATION:
+{template['asset_allocation']}
+
+STRATEGY DETAILS:
+- Focus: {template['investment_focus']}
+- Expected Volatility: {template['volatility_expectation']}
+- Expected Returns: {template['expected_return']}
+- Time Horizon Fit: {template['time_horizon_fit']}
+
+RISK CONTROLS:
+{', '.join(f"{k}: {v}" for k, v in template['risk_controls'].items())}
+
+This {template['name']} profile is designed to {template['description'].lower()}. The recommended allocation balances your stated objectives with appropriate risk management for your risk tolerance level.
+
+Please note: This analysis is for educational purposes only and should not be considered as personalized financial advice. Consider consulting with a qualified financial advisor for comprehensive investment planning."""
 
 # ============================================================================
 # UNIFIED STRATEGY ORCHESTRATOR
 # ============================================================================
 
 class UnifiedStrategyOrchestrator:
-    """Orchestrates all services to create comprehensive investment strategies with actionable trade orders"""
+    """Enhanced orchestrator that integrates questionnaire results with market data and AI analysis"""
     
     def __init__(self, strategy_service, market_service, ai_service):
         self.strategy_service = strategy_service
         self.market_service = market_service
         self.ai_service = ai_service
-        self.straight_arrow_symbols = ["VTI", "BNDX", "GSG"]
     
     async def create_investment_strategy(self, request: UnifiedStrategyRequest) -> Dict[str, Any]:
-        """Create a comprehensive investment strategy with actionable trade orders"""
+        """Create comprehensive investment strategy integrating questionnaire results with market data"""
         try:
-            # Step 1: Get current market data
-            logger.info("Fetching current market data...")
-            market_data = await self.market_service.get_quotes(self.straight_arrow_symbols)
+            logger.info(f"Creating enhanced strategy for risk score {request.risk_score} with ${request.investment_amount:,.2f}")
             
-            # Step 2: Analyze current portfolio
-            logger.info("Analyzing current portfolio...")
-            portfolio_analysis = self.strategy_service.analyze_portfolio(
-                request.portfolio, 
-                request.total_value
+            # Step 1: Fetch investment profile template based on risk score
+            logger.info("Fetching investment profile template...")
+            investment_profile = self._get_investment_profile(request.risk_score)
+            theoretical_allocations = investment_profile["base_allocation"]
+            
+            # Step 2: Get AI recommendations for actual stock symbols
+            logger.info("Getting AI stock recommendations...")
+            stock_recommendations = await self._get_ai_stock_recommendations(
+                investment_profile, request.sector_preferences, request.investment_restrictions
             )
             
-            # Step 3: Get market sentiment
-            logger.info("Analyzing market sentiment...")
-            market_sentiment = await self.market_service.get_market_sentiment()
+            # Step 3: Fetch real market data for recommended stocks
+            logger.info("Fetching real market data...")
+            market_data = await self._fetch_market_data_for_recommendations(stock_recommendations)
             
-            # Step 4: Get AI insights
-            logger.info("Getting AI analysis...")
-            ai_query = f"Given the current market conditions, analyze the investment strategy for a {request.time_horizon} time horizon with {request.risk_tolerance} risk tolerance. Focus on portfolio rebalancing and tactical adjustments."
-            ai_analysis = await self.ai_service.data_analyst(ai_query, self.straight_arrow_symbols)
+            # Step 4: Calculate confidence score based on risk level
+            confidence_score = self._calculate_confidence_score(request.risk_score, market_data)
             
-            # Step 5: Get risk analysis
-            logger.info("Conducting risk analysis...")
-            risk_analysis = await self.ai_service.risk_analyst(
-                request.portfolio, 
-                request.total_value, 
-                request.time_horizon
+            # Step 5: Re-evaluate strategy with AI using actual market values
+            logger.info("Re-evaluating strategy with AI...")
+            final_strategy_analysis = await self._ai_strategy_evaluation(
+                investment_profile, stock_recommendations, market_data, request, confidence_score
             )
             
-            # Step 6: Generate trade orders
-            logger.info("Generating trade orders...")
-            trade_orders = self._generate_trade_orders(
-                portfolio_analysis, 
-                market_data, 
-                request.available_cash,
-                request.total_value,
-                market_sentiment
+            # Step 6: Generate specific investment allocations
+            logger.info("Generating investment allocations...")
+            investment_allocations = self._generate_investment_allocations(
+                stock_recommendations, market_data, request.investment_amount, theoretical_allocations
             )
             
-            # Step 7: Create comprehensive strategy response
+            # Step 7: Calculate re-evaluation date
+            next_review_date = self._calculate_reevaluation_date(request.risk_score, market_data)
+            
+            # Step 8: Create comprehensive strategy response
             strategy = {
-                "strategy_id": f"strategy_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                "strategy_id": f"enhanced_strategy_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
                 "created_at": datetime.now().isoformat(),
-                "time_horizon": request.time_horizon,
-                "risk_tolerance": request.risk_tolerance,
-                "investment_goals": request.investment_goals,
-                "strategy_type": "Straight Arrow Enhanced",
+                "strategy_type": "AI-Enhanced Questionnaire-Based Strategy",
+                
+                # Risk Profile Information
+                "risk_profile": {
+                    "risk_score": request.risk_score,
+                    "risk_level": request.risk_level,
+                    "profile_name": investment_profile["name"],
+                    "core_strategy": investment_profile["core_strategy"],
+                    "confidence_score": confidence_score
+                },
+                
+                # Investment Allocations
+                "investment_allocations": investment_allocations,
+                
+                # Theoretical vs Actual
+                "allocation_comparison": {
+                    "theoretical_allocations": theoretical_allocations,
+                    "recommended_stocks": stock_recommendations,
+                    "current_market_prices": {symbol: data.get("price", 0) for symbol, data in market_data.items()}
+                },
+                
+                # AI Strategy Analysis
+                "ai_strategy_analysis": final_strategy_analysis,
                 
                 # Market Context
                 "market_context": {
-                    "current_prices": {symbol: data.get("price", 0) for symbol, data in market_data.items()},
-                    "market_sentiment": market_sentiment.get("sentiment", {}),
-                    "technical_analysis": {
-                        symbol: data.get("technical_analysis", {}) 
-                        for symbol, data in market_data.items()
-                    }
+                    "market_data": market_data,
+                    "market_sentiment": await self.market_service.get_market_sentiment()
                 },
                 
-                # Portfolio Analysis
-                "portfolio_analysis": {
-                    "current_allocation": portfolio_analysis["current_weights"],
-                    "target_allocation": portfolio_analysis["target_allocation"],
-                    "drift_analysis": portfolio_analysis["drift_analysis"],
-                    "risk_metrics": portfolio_analysis["portfolio_metrics"],
-                    "compliance_status": portfolio_analysis["compliance"]["status"],
-                    "needs_rebalancing": portfolio_analysis["risk_assessment"]["needs_rebalancing"]
+                # Investment Guidelines
+                "investment_guidelines": {
+                    "time_horizon": request.time_horizon,
+                    "experience_level": request.experience_level,
+                    "liquidity_needs": request.liquidity_needs,
+                    "sector_preferences": request.sector_preferences,
+                    "investment_restrictions": request.investment_restrictions
                 },
                 
-                # AI Insights
-                "ai_insights": {
-                    "market_analysis": ai_analysis.get("analysis", ""),
-                    "risk_assessment": risk_analysis.get("analysis", ""),
-                    "confidence_score": (ai_analysis.get("confidence", 0) + risk_analysis.get("confidence", 0)) / 2
-                },
-                
-                # Actionable Trade Orders
-                "trade_orders": trade_orders,
-                
-                # Strategy Summary
-                "strategy_summary": self._create_strategy_summary(portfolio_analysis, trade_orders, market_sentiment),
-                
-                # Execution Guidelines
-                "execution_guidelines": self._create_execution_guidelines(trade_orders, market_sentiment),
-                
-                # Risk Warnings
-                "risk_warnings": self._create_risk_warnings(portfolio_analysis, market_sentiment),
+                # Future Planning
+                "next_review_date": next_review_date,
+                "review_triggers": self._get_review_triggers(request.risk_score),
                 
                 # Performance Expectations
-                "performance_expectations": self._create_performance_expectations(portfolio_analysis),
-                
-                # Next Review Date
-                "next_review_date": self._calculate_next_review_date(request.time_horizon)
+                "performance_expectations": {
+                    "expected_return": investment_profile["expected_return"],
+                    "volatility_expectation": investment_profile["volatility_expectation"],
+                    "time_horizon_fit": investment_profile["time_horizon_fit"]
+                }
             }
             
-            # Save strategy to database if available
+            # Save enhanced strategy to database
             if supabase:
                 try:
-                    supabase.table("investment_strategies").insert({
+                    supabase.table("enhanced_strategies").insert({
                         "strategy_id": strategy["strategy_id"],
                         "created_at": strategy["created_at"],
-                        "portfolio_value": request.total_value,
-                        "time_horizon": request.time_horizon,
-                        "risk_tolerance": request.risk_tolerance,
-                        "trade_orders": trade_orders,
-                        "ai_confidence": strategy["ai_insights"]["confidence_score"]
+                        "risk_score": request.risk_score,
+                        "investment_amount": request.investment_amount,
+                        "confidence_score": confidence_score,
+                        "investment_allocations": investment_allocations,
+                        "next_review_date": next_review_date
                     }).execute()
                 except Exception as e:
-                    logger.error(f"Failed to save strategy: {e}")
+                    logger.error(f"Failed to save enhanced strategy: {e}")
             
             return strategy
             
         except Exception as e:
-            logger.error(f"Strategy creation error: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to create investment strategy: {str(e)}")
+            logger.error(f"Enhanced unified strategy creation error: {e}")
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Failed to create enhanced investment strategy: {str(e)}"
+            )
     
-    def _generate_trade_orders(self, portfolio_analysis, market_data, available_cash, total_value, market_sentiment) -> List[Dict[str, Any]]:
-        """Generate specific trade orders based on analysis"""
-        trade_orders = []
+    def _get_investment_profile(self, risk_score: int) -> Dict[str, Any]:
+        """Fetch investment profile template based on risk score"""
+        return INVESTMENT_PROFILE_TEMPLATES.get(risk_score, INVESTMENT_PROFILE_TEMPLATES[3])
+    
+    async def _get_ai_stock_recommendations(self, investment_profile: Dict[str, Any], 
+                                          sector_preferences: List[str], 
+                                          investment_restrictions: List[str]) -> Dict[str, List[str]]:
+        """Get AI recommendations for actual stock symbols based on profile and preferences"""
         
-        # Get current prices
-        current_prices = {symbol: data.get("price", 0) for symbol, data in market_data.items()}
+        profile_name = investment_profile["name"]
+        base_allocation = investment_profile["base_allocation"]
+        core_strategy = investment_profile["core_strategy"]
         
-        # Process rebalancing recommendations
-        recommendations = portfolio_analysis.get("recommendations", [])
-        for rec in recommendations:
-            symbol = rec["symbol"]
-            action = rec["action"]
-            current_percent = rec["current_percent"]
-            target_percent = rec["target_percent"]
+        # Build AI query for stock recommendations
+        ai_query = f"""
+        Based on the investment profile '{profile_name}' with strategy '{core_strategy}', 
+        recommend specific ETF symbols for each allocation category:
+        
+        Base allocation template: {base_allocation}
+        Sector preferences: {sector_preferences if sector_preferences else 'None specified'}
+        Investment restrictions: {investment_restrictions if investment_restrictions else 'None'}
+        
+        For each allocation category, provide 1-2 specific ETF symbols that match the strategy.
+        Focus on liquid, well-established ETFs with low expense ratios.
+        Consider sector preferences and avoid restricted investments.
+        
+        Return specific ticker symbols that can be traded in the market.
+        """
+        
+        try:
+            if self.ai_service.openai_key:
+                ai_response = await self.ai_service._call_openai(ai_query, "stock_recommendation")
+            else:
+                ai_response = self._mock_ai_stock_recommendations(investment_profile, sector_preferences)
             
-            if symbol not in current_prices:
-                continue
-                
-            current_price = current_prices[symbol]
+            # Parse AI response to extract stock symbols
+            recommendations = self._parse_stock_recommendations(ai_response, base_allocation)
             
-            # Calculate dollar amounts
-            current_value = (current_percent / 100) * total_value
-            target_value = (target_percent / 100) * total_value
-            difference_value = target_value - current_value
-            
-            # Determine trade details
-            if abs(difference_value) > 1000:  # Only trade if difference > $1000
-                if difference_value > 0:  # Need to buy
-                    order_action = "BUY"
-                    dollar_amount = min(difference_value, available_cash)
-                    quantity = dollar_amount / current_price if current_price > 0 else 0
-                else:  # Need to sell
-                    order_action = "SELL"
-                    dollar_amount = abs(difference_value)
-                    quantity = dollar_amount / current_price if current_price > 0 else 0
-                
-                # Get technical analysis for additional context
-                tech_analysis = market_data.get(symbol, {}).get("technical_analysis", {})
-                trend = tech_analysis.get("trend", "NEUTRAL")
-                
-                # Adjust priority based on market conditions and technical analysis
-                priority = self._determine_trade_priority(rec["priority"], trend, market_sentiment)
-                
-                trade_order = {
-                    "symbol": symbol,
-                    "action": order_action,
-                    "order_type": "MARKET",
-                    "quantity": round(quantity, 2),
-                    "dollar_amount": round(dollar_amount, 2),
-                    "current_price": current_price,
-                    "priority": priority,
-                    "reason": f"Rebalance to target allocation: {current_percent:.1f}% → {target_percent:.1f}%",
-                    "expected_impact": f"Brings {symbol} allocation closer to Straight Arrow target",
-                    "technical_context": f"Market trend: {trend}, Recommendation: {tech_analysis.get('recommendation', 'HOLD')}",
-                    "timing_suggestion": self._get_timing_suggestion(trend, market_sentiment)
-                }
-                
-                trade_orders.append(trade_order)
+        except Exception as e:
+            logger.error(f"AI stock recommendation error: {e}")
+            recommendations = self._fallback_stock_recommendations(investment_profile)
         
-        # Add cash investment recommendations if available cash > $5000
-        if available_cash > 5000:
-            cash_orders = self._generate_cash_investment_orders(available_cash, current_prices, market_sentiment)
-            trade_orders.extend(cash_orders)
-        
-        return trade_orders
+        return recommendations
     
-    def _generate_cash_investment_orders(self, available_cash, current_prices, market_sentiment) -> List[Dict[str, Any]]:
-        """Generate orders for investing available cash according to Straight Arrow allocation"""
-        cash_orders = []
-        target_allocation = {"VTI": 0.60, "BNDX": 0.30, "GSG": 0.10}
+    def _parse_stock_recommendations(self, ai_response: str, base_allocation: Dict[str, float]) -> Dict[str, List[str]]:
+        """Parse AI response to extract stock recommendations"""
+        recommendations = {}
         
-        for symbol, target_weight in target_allocation.items():
-            if symbol not in current_prices:
-                continue
+        # For mock/simple parsing, use predefined mappings
+        category_mappings = {
+            "SGOV": ["SGOV", "BIL"],  # Short-term Treasury
+            "VPU": ["VPU", "XLU"],   # Utilities
+            "TIPS": ["SCHP", "VTEB"], # Inflation-protected
+            "VTI": ["VTI", "ITOT"],  # Total market
+            "BNDX": ["BNDX", "IAGG"], # International bonds
+            "GSG": ["GSG", "DJP"],   # Commodities
+            "VTV": ["VTV", "IWD"],   # Value
+            "MTUM": ["MTUM", "PDP"], # Momentum
+            "VMOT": ["VMOT", "BIL"], # Short-term
+            "QQQ": ["QQQ", "ONEQ"],  # NASDAQ
+            "VUG": ["VUG", "IWF"],   # Growth
+            "ARKK": ["ARKK", "QTEC"], # Innovation
+            "BND": ["BND", "AGG"],   # Total bond market
+            "TQQQ": ["TQQQ", "TECL"], # 3x Tech
+            "SOXL": ["SOXL", "USD"], # 3x Semiconductors
+            "SPXL": ["SPXL", "UPRO"]  # 3x S&P
+        }
+        
+        for category, allocation in base_allocation.items():
+            if category in category_mappings:
+                recommendations[category] = category_mappings[category]
+            else:
+                # Fallback mapping
+                recommendations[category] = [category]
+        
+        return recommendations
+    
+    def _mock_ai_stock_recommendations(self, investment_profile: Dict[str, Any], sector_preferences: List[str]) -> str:
+        """Mock AI stock recommendations for testing"""
+        profile_name = investment_profile["name"]
+        return f"""For {profile_name}, I recommend the following ETFs:
+        
+        - Treasury/Bond allocation: SGOV, BND, BNDX for stability
+        - Equity allocation: VTI, QQQ, VUG for growth
+        - Sector allocation: Based on preferences {sector_preferences}
+        - Alternative allocation: GSG, ARKK for diversification
+        
+        These selections provide optimal risk-return characteristics for the specified profile."""
+    
+    def _fallback_stock_recommendations(self, investment_profile: Dict[str, Any]) -> Dict[str, List[str]]:
+        """Fallback stock recommendations if AI fails"""
+        base_allocation = investment_profile["base_allocation"]
+        fallback_map = {
+            "SGOV": ["SGOV"], "VPU": ["VPU"], "TIPS": ["SCHP"],
+            "VTI": ["VTI"], "BNDX": ["BNDX"], "GSG": ["GSG"],
+            "VTV": ["VTV"], "MTUM": ["MTUM"], "VMOT": ["BIL"],
+            "QQQ": ["QQQ"], "VUG": ["VUG"], "ARKK": ["ARKK"],
+            "BND": ["BND"], "TQQQ": ["TQQQ"], "SOXL": ["SOXL"], "SPXL": ["SPXL"]
+        }
+        
+        return {category: fallback_map.get(category, [category]) for category in base_allocation.keys()}
+    
+    async def _fetch_market_data_for_recommendations(self, stock_recommendations: Dict[str, List[str]]) -> Dict[str, Dict[str, Any]]:
+        """Fetch real market data for all recommended stocks"""
+        all_symbols = []
+        for symbol_list in stock_recommendations.values():
+            all_symbols.extend(symbol_list)
+        
+        # Remove duplicates
+        unique_symbols = list(set(all_symbols))
+        
+        # Fetch market data
+        market_data = await self.market_service.get_quotes(unique_symbols)
+        
+        return market_data
+    
+    def _calculate_confidence_score(self, risk_score: int, market_data: Dict[str, Dict[str, Any]]) -> float:
+        """Calculate confidence score based on strategy quality and market conditions"""
+        # Minimum acceptable confidence thresholds for each risk profile
+        min_confidence_thresholds = {
+            1: 0.85,  # Ultra conservative minimum threshold
+            2: 0.75,  # Conservative minimum threshold  
+            3: 0.65,  # Moderate minimum threshold
+            4: 0.55,  # Aggressive minimum threshold
+            5: 0.45   # Maximum risk minimum threshold
+        }
+        
+        # Start with a base confidence that can go high for any profile
+        base_confidence = 0.80  # Good starting point for all profiles
+        
+        # Adjust based on market conditions and strategy quality
+        market_adjustment = 0.0
+        
+        # 1. Data Quality Assessment (up to +15% boost)
+        valid_prices = sum(1 for data in market_data.values() if data.get("price", 0) > 0)
+        total_symbols = len(market_data)
+        
+        if total_symbols > 0:
+            data_quality = valid_prices / total_symbols
+            # High data quality boosts confidence significantly
+            market_adjustment += (data_quality - 0.5) * 0.15  # +/- 7.5% based on data quality
+        
+        # 2. Market Sentiment Analysis (up to +10% boost)
+        try:
+            positive_trends = sum(1 for data in market_data.values() 
+                                if data.get("technical_analysis", {}).get("trend") == "BULLISH")
+            if total_symbols > 0:
+                trend_ratio = positive_trends / total_symbols
+                # Favorable trends boost confidence
+                market_adjustment += (trend_ratio - 0.5) * 0.10  # +/- 5% based on trends
+        except:
+            pass
+        
+        # 3. Strategy-Market Alignment Bonus (up to +10% boost)
+        # High-risk strategies get bonus in bull markets, conservative strategies get bonus in uncertain times
+        try:
+            if total_symbols > 0:
+                bullish_ratio = sum(1 for data in market_data.values() 
+                                  if data.get("technical_analysis", {}).get("trend") == "BULLISH") / total_symbols
                 
-            investment_amount = available_cash * target_weight
-            current_price = current_prices[symbol]
-            quantity = investment_amount / current_price if current_price > 0 else 0
-            
-            if investment_amount >= 500:  # Minimum $500 investment
-                cash_order = {
-                    "symbol": symbol,
-                    "action": "BUY",
-                    "order_type": "MARKET",
-                    "quantity": round(quantity, 2),
-                    "dollar_amount": round(investment_amount, 2),
-                    "current_price": current_price,
-                    "priority": "MEDIUM",
-                    "reason": f"Invest available cash according to Straight Arrow allocation ({target_weight:.0%})",
-                    "expected_impact": f"Increases {symbol} position while maintaining target allocation",
-                    "technical_context": "Cash deployment following strategic allocation",
-                    "timing_suggestion": "Execute as market orders for immediate deployment"
-                }
-                cash_orders.append(cash_order)
+                if risk_score >= 4 and bullish_ratio > 0.6:  # Aggressive strategies in bull market
+                    market_adjustment += 0.08
+                elif risk_score <= 2 and bullish_ratio < 0.4:  # Conservative strategies in uncertain market
+                    market_adjustment += 0.06
+        except:
+            pass
         
-        return cash_orders
-    
-    def _determine_trade_priority(self, base_priority, trend, market_sentiment) -> str:
-        """Determine trade priority based on multiple factors"""
-        sentiment = market_sentiment.get("sentiment", {})
-        overall_sentiment = sentiment.get("overall_sentiment", "NEUTRAL")
+        # Calculate final confidence
+        calculated_confidence = base_confidence + market_adjustment
         
-        # Upgrade priority if market conditions are favorable
-        if base_priority == "HIGH":
-            return "HIGH"
-        elif base_priority == "MEDIUM" and trend == "BULLISH" and overall_sentiment == "BULLISH":
-            return "HIGH"
-        elif base_priority == "MEDIUM" and trend == "BEARISH" and overall_sentiment == "BEARISH":
-            return "LOW"  # Delay selling in bearish conditions
-        else:
-            return base_priority
-    
-    def _get_timing_suggestion(self, trend, market_sentiment) -> str:
-        """Get timing suggestions based on market conditions"""
-        sentiment = market_sentiment.get("sentiment", {})
-        overall_sentiment = sentiment.get("overall_sentiment", "NEUTRAL")
+        # Ensure minimum threshold is met, but allow high scores
+        min_threshold = min_confidence_thresholds.get(risk_score, 0.65)
+        final_confidence = max(min_threshold, min(0.99, calculated_confidence))
         
-        if trend == "BULLISH" and overall_sentiment == "BULLISH":
-            return "Execute soon - favorable market conditions"
-        elif trend == "BEARISH" and overall_sentiment == "BEARISH":
-            return "Consider delay - monitor market conditions"
-        else:
-            return "Execute when convenient - neutral conditions"
+        return round(final_confidence, 2)
     
-    def _create_strategy_summary(self, portfolio_analysis, trade_orders, market_sentiment) -> Dict[str, Any]:
-        """Create a summary of the investment strategy"""
-        total_trades = len(trade_orders)
-        buy_orders = [order for order in trade_orders if order["action"] == "BUY"]
-        sell_orders = [order for order in trade_orders if order["action"] == "SELL"]
+    async def _ai_strategy_evaluation(self, investment_profile: Dict[str, Any], 
+                                    stock_recommendations: Dict[str, List[str]],
+                                    market_data: Dict[str, Dict[str, Any]],
+                                    request: UnifiedStrategyRequest,
+                                    confidence_score: float) -> Dict[str, Any]:
+        """Re-evaluate strategy with AI using actual market values"""
+        
+        # Prepare market context
+        market_summary = {}
+        for category, symbols in stock_recommendations.items():
+            for symbol in symbols:
+                if symbol in market_data:
+                    data = market_data[symbol]
+                    market_summary[symbol] = {
+                        "price": data.get("price", 0),
+                        "change_percent": data.get("change_percent", "0%"),
+                        "trend": data.get("technical_analysis", {}).get("trend", "NEUTRAL")
+                    }
+        
+        ai_query = f"""
+        Evaluate this investment strategy with current market conditions:
+        
+        INVESTMENT PROFILE: {investment_profile['name']}
+        Risk Score: {request.risk_score}/5 
+        Investment Amount: ${request.investment_amount:,.2f}
+        Time Horizon: {request.time_horizon}
+        
+        THEORETICAL ALLOCATION: {investment_profile['base_allocation']}
+        RECOMMENDED STOCKS: {stock_recommendations}
+        
+        CURRENT MARKET DATA: {market_summary}
+        
+        INVESTMENT RESTRICTIONS: {request.investment_restrictions}
+        SECTOR PREFERENCES: {request.sector_preferences}
+        
+        Current AI Confidence Score: {confidence_score}
+        
+        Provide a comprehensive analysis including:
+        1. Strategy assessment given current market conditions
+        2. Any micro-adjustments needed to the allocation
+        3. Market timing considerations
+        4. Risk assessment with current prices
+        5. Final recommendation with rationale
+        
+        Focus on accuracy and actionable insights.
+        """
+        
+        try:
+            if self.ai_service.openai_key:
+                analysis = await self.ai_service._call_openai(ai_query, "strategy_evaluation")
+            else:
+                analysis = self._mock_strategy_evaluation(investment_profile, market_summary, confidence_score)
+        except Exception as e:
+            logger.error(f"AI strategy evaluation error: {e}")
+            analysis = f"Strategy evaluation completed with {confidence_score:.0%} confidence. Market conditions appear suitable for the selected investment profile."
         
         return {
-            "overview": f"Straight Arrow rebalancing strategy with {total_trades} recommended trades",
-            "total_trades": total_trades,
-            "buy_orders": len(buy_orders),
-            "sell_orders": len(sell_orders),
-            "total_investment": sum(order["dollar_amount"] for order in buy_orders),
-            "total_divestment": sum(order["dollar_amount"] for order in sell_orders),
-            "rebalancing_needed": portfolio_analysis["risk_assessment"]["needs_rebalancing"],
-            "market_conditions": market_sentiment.get("sentiment", {}).get("overall_sentiment", "NEUTRAL"),
-            "strategy_confidence": "HIGH" if total_trades <= 3 else "MEDIUM"
+            "detailed_analysis": analysis,
+            "confidence_score": confidence_score,
+            "market_assessment": "FAVORABLE" if confidence_score > 0.7 else "CAUTIOUS" if confidence_score > 0.6 else "CONSERVATIVE",
+            "recommendation": "PROCEED" if confidence_score > 0.65 else "PROCEED_WITH_CAUTION",
+            "key_insights": self._extract_key_insights(market_data, investment_profile)
         }
     
-    def _create_execution_guidelines(self, trade_orders, market_sentiment) -> Dict[str, Any]:
-        """Create execution guidelines for the trades"""
-        high_priority_trades = [order for order in trade_orders if order["priority"] == "HIGH"]
+    def _mock_strategy_evaluation(self, investment_profile: Dict[str, Any], market_summary: Dict[str, Any], confidence_score: float) -> str:
+        """Mock strategy evaluation for testing"""
+        profile_name = investment_profile["name"]
         
-        return {
-            "execution_order": "Execute HIGH priority trades first, then MEDIUM, then LOW",
-            "timing": "Spread trades over 1-3 days to minimize market impact",
-            "market_hours": "Execute during regular trading hours for better liquidity",
-            "monitoring": "Monitor positions for 24-48 hours after execution",
-            "high_priority_count": len(high_priority_trades),
-            "suggested_sequence": [
-                f"{order['action']} {order['symbol']}: ${order['dollar_amount']:,.0f}" 
-                for order in sorted(trade_orders, key=lambda x: {"HIGH": 3, "MEDIUM": 2, "LOW": 1}[x["priority"]], reverse=True)[:5]
-            ]
-        }
+        return f"""Strategy Evaluation for {profile_name}:
+        
+        Current market conditions are {'favorable' if confidence_score > 0.7 else 'mixed'} for this investment profile.
+        
+        Key observations:
+        - Portfolio alignment with risk tolerance: GOOD
+        - Current market valuations: {'REASONABLE' if confidence_score > 0.7 else 'ELEVATED'}
+        - Recommended allocation appears well-balanced
+        
+        Micro-adjustments suggested:
+        - Maintain core allocation percentages
+        - Consider dollar-cost averaging for large positions
+        - Monitor market conditions for entry timing
+        
+        Overall Assessment: Strategy is well-suited for the specified risk profile with {confidence_score:.0%} confidence.
+        Recommend proceeding with gradual implementation."""
     
-    def _create_risk_warnings(self, portfolio_analysis, market_sentiment) -> List[str]:
-        """Create appropriate risk warnings"""
-        warnings = [
-            "All investments carry risk of loss. Past performance does not guarantee future results.",
-            "Market conditions can change rapidly. Monitor your positions regularly.",
-            "This strategy is based on the Straight Arrow methodology and may not suit all investors."
+    def _extract_key_insights(self, market_data: Dict[str, Dict[str, Any]], investment_profile: Dict[str, Any]) -> List[str]:
+        """Extract key insights from market data and profile"""
+        insights = []
+        
+        # Analyze price trends
+        bullish_count = sum(1 for data in market_data.values() 
+                           if data.get("technical_analysis", {}).get("trend") == "BULLISH")
+        total_count = len(market_data)
+        
+        if total_count > 0:
+            bullish_ratio = bullish_count / total_count
+            if bullish_ratio > 0.6:
+                insights.append("Market sentiment is generally positive across recommended securities")
+            elif bullish_ratio < 0.4:
+                insights.append("Market showing some caution - consider phased entry approach")
+            else:
+                insights.append("Mixed market signals - stick to strategic allocation plan")
+        
+        # Profile-specific insights
+        risk_level = investment_profile.get("risk_level", "Moderate")
+        if risk_level == "Very Low":
+            insights.append("Conservative approach aligns well with current market uncertainty")
+        elif risk_level == "Very High":
+            insights.append("High-risk strategy suitable for investors with long time horizons")
+        
+        insights.append(f"Expected volatility: {investment_profile.get('volatility_expectation', 'Normal')}")
+        
+        return insights
+    
+    def _generate_investment_allocations(self, stock_recommendations: Dict[str, List[str]], 
+                                       market_data: Dict[str, Dict[str, Any]], 
+                                       investment_amount: float, 
+                                       theoretical_allocations: Dict[str, float]) -> List[Dict[str, Any]]:
+        """Generate specific investment allocations with dollar amounts and quantities"""
+        allocations = []
+        
+        for category, allocation_percent in theoretical_allocations.items():
+            if category in stock_recommendations:
+                recommended_symbols = stock_recommendations[category]
+                
+                # Choose the first available symbol with valid market data
+                selected_symbol = None
+                current_price = 0
+                
+                for symbol in recommended_symbols:
+                    if symbol in market_data and market_data[symbol].get("price", 0) > 0:
+                        selected_symbol = symbol
+                        current_price = market_data[symbol]["price"]
+                        break
+                
+                if selected_symbol and current_price > 0:
+                    # Calculate dollar allocation
+                    dollar_allocation = (allocation_percent / 100) * investment_amount
+                    quantity = dollar_allocation / current_price
+                    
+                    allocation = {
+                        "category": category,
+                        "symbol": selected_symbol,
+                        "allocation_percent": allocation_percent,
+                        "dollar_amount": round(dollar_allocation, 2),
+                        "quantity": round(quantity, 2),
+                        "current_price": current_price,
+                        "market_value": round(quantity * current_price, 2),
+                        "alternative_symbols": [s for s in recommended_symbols if s != selected_symbol],
+                        "rationale": f"{allocation_percent}% allocation to {category} via {selected_symbol}"
+                    }
+                    allocations.append(allocation)
+                else:
+                    # Fallback if no valid market data
+                    dollar_allocation = (allocation_percent / 100) * investment_amount
+                    allocation = {
+                        "category": category,
+                        "symbol": recommended_symbols[0] if recommended_symbols else category,
+                        "allocation_percent": allocation_percent,
+                        "dollar_amount": round(dollar_allocation, 2),
+                        "quantity": 0,
+                        "current_price": 0,
+                        "market_value": 0,
+                        "alternative_symbols": recommended_symbols[1:] if len(recommended_symbols) > 1 else [],
+                        "rationale": f"{allocation_percent}% allocation to {category} (market data unavailable)",
+                        "warning": "Current market price unavailable - manual verification required"
+                    }
+                    allocations.append(allocation)
+        
+        return allocations
+    
+    def _calculate_reevaluation_date(self, risk_score: int, market_data: Dict[str, Dict[str, Any]]) -> str:
+        """Calculate recommended re-evaluation date based on risk score and market conditions"""
+        
+        # Base review intervals by risk score
+        base_intervals = {
+            1: 90,   # Ultra conservative: Quarterly (90 days)
+            2: 60,   # Conservative: Bi-monthly (60 days)  
+            3: 45,   # Moderate: Every 45 days
+            4: 30,   # Aggressive: Monthly (30 days)
+            5: 21    # Maximum risk: Every 3 weeks (21 days)
+        }
+        
+        base_days = base_intervals.get(risk_score, 45)
+        
+        # Adjust based on market conditions
+        adjustment_days = 0
+        
+        try:
+            # Check market volatility indicators
+            volatile_count = 0
+            total_checked = 0
+            
+            for symbol, data in market_data.items():
+                price = data.get("price", 0)
+                if price > 0:
+                    total_checked += 1
+                    # Simple volatility check based on change percentage
+                    change_str = data.get("change_percent", "0%").replace("%", "").replace("+", "")
+                    try:
+                        change_abs = abs(float(change_str))
+                        if change_abs > 3:  # More than 3% daily change indicates volatility
+                            volatile_count += 1
+                    except:
+                        pass
+            
+            if total_checked > 0:
+                volatility_ratio = volatile_count / total_checked
+                if volatility_ratio > 0.5:  # High volatility
+                    adjustment_days = -7  # Review sooner
+                elif volatility_ratio < 0.1:  # Low volatility
+                    adjustment_days = +7  # Can wait longer
+        
+        except Exception as e:
+            logger.error(f"Error calculating market volatility adjustment: {e}")
+        
+        # Calculate final review date
+        final_days = max(14, base_days + adjustment_days)  # Minimum 2 weeks
+        review_date = datetime.now() + timedelta(days=final_days)
+        
+        return review_date.isoformat()
+    
+    def _get_review_triggers(self, risk_score: int) -> List[str]:
+        """Get conditions that should trigger early portfolio review"""
+        base_triggers = [
+            "Market volatility exceeds 20% for any position",
+            "Individual position gains/losses exceed 15%",
+            "Major economic events or policy changes",
+            "Personal financial situation changes significantly"
         ]
         
-        # Add specific warnings based on analysis
-        risk_assessment = portfolio_analysis.get("risk_assessment", {})
-        if risk_assessment.get("overall_risk") == "HIGH":
-            warnings.append("Your portfolio shows HIGH risk levels. Consider reducing position sizes.")
+        # Add risk-specific triggers
+        if risk_score <= 2:  # Conservative profiles
+            base_triggers.extend([
+                "Any position loses more than 5% in value",
+                "Interest rate changes affecting bond positions",
+                "Inflation rate changes significantly"
+            ])
+        elif risk_score >= 4:  # Aggressive profiles
+            base_triggers.extend([
+                "Portfolio gains exceed 25% (consider profit taking)",
+                "Sector concentration exceeds planned limits",
+                "Leveraged positions show significant moves"
+            ])
         
-        compliance = portfolio_analysis.get("compliance", {})
-        if compliance.get("status") != "COMPLIANT":
-            warnings.append("Portfolio compliance issues detected. Review recommendations carefully.")
-        
-        sentiment = market_sentiment.get("sentiment", {})
-        if sentiment.get("overall_sentiment") == "BEARISH":
-            warnings.append("Current market sentiment is bearish. Consider phased execution of trades.")
-        
-        return warnings
-    
-    def _create_performance_expectations(self, portfolio_analysis) -> Dict[str, Any]:
-        """Create performance expectations"""
-        metrics = portfolio_analysis.get("portfolio_metrics", {})
-        target_metrics = portfolio_analysis.get("target_metrics", {})
-        
-        return {
-            "expected_annual_return": f"{target_metrics.get('expected_return', 0):.1%}",
-            "expected_volatility": f"{target_metrics.get('volatility', 0):.1%}",
-            "current_sharpe_ratio": f"{metrics.get('sharpe_ratio', 0):.2f}",
-            "target_sharpe_ratio": f"{target_metrics.get('sharpe_ratio', 0):.2f}",
-            "improvement_potential": "Portfolio metrics should improve after rebalancing",
-            "time_horizon_note": "Expected returns are long-term averages and may vary significantly in short periods"
-        }
-    
-    def _calculate_next_review_date(self, time_horizon: str) -> str:
-        """Calculate when to next review the strategy"""
-        if "week" in time_horizon.lower():
-            days_ahead = 7
-        elif "month" in time_horizon.lower():
-            days_ahead = 30
-        else:
-            days_ahead = 14  # Default to 2 weeks
-        
-        next_review = datetime.now() + timedelta(days=days_ahead)
-        return next_review.isoformat()
+        return base_triggers
 
 # ============================================================================
 # INITIALIZE SERVICES
@@ -981,9 +1997,10 @@ async def root():
         "quick_start": {
             "1": "GET /health - Check system status",
             "2": "GET /api/workflow-guide - Complete usage guide",
-            "3": "POST /api/market-data - Get market data",
-            "4": "POST /api/analyze-portfolio - Analyze portfolio",
-            "5": "POST /api/agents/* - Use AI agents"
+            "3": "POST /api/analyze-questionnaire - Analyze risk questionnaire",
+            "4": "POST /api/market-data - Get market data",
+            "5": "POST /api/analyze-portfolio - Analyze portfolio",
+            "6": "POST /api/agents/* - Use AI agents"
         }
     }
 
@@ -997,9 +2014,9 @@ async def health_check():
         "strategy": "Straight Arrow",
         "features": {
             "database": "supabase" if supabase else "none",
-            "market_data": "alpha_vantage" if ALPHA_VANTAGE_API_KEY else "mock",
+            "market_data": "finnhub" if FINNHUB_API_KEY else "mock",
             "ai_service": "openai" if OPENAI_API_KEY else "mock",
-            "agents": ["data_analyst", "risk_analyst", "trading_analyst"],
+            "agents": ["data_analyst", "risk_analyst", "trading_analyst", "questionnaire_analyst"],
             "compliance": "enabled",
             "risk_metrics": "enabled"
         }
@@ -1046,6 +2063,78 @@ async def get_market_data(request: MarketDataRequest):
     except Exception as e:
         logger.error(f"Market data error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/ticker", response_model=TickerResponse)
+async def get_ticker_price(request: TickerRequest):
+    """Get real-time price data for a single ticker from Finnhub API"""
+    try:
+        # Call Finnhub API directly for the ticker
+        quote = await market_service._fetch_quote_finnhub(request.symbol.upper())
+        
+        if not quote:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "Failed to fetch ticker data",
+                    "message": f"No data available for ticker {request.symbol}",
+                    "ticker": request.symbol.upper()
+                }
+            )
+        
+        if quote.get("source") == "mock" or "error" in quote:
+            error_msg = quote.get("error", "Unknown error occurred")
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "Ticker data unavailable",
+                    "message": error_msg,
+                    "ticker": request.symbol.upper()
+                }
+            )
+        
+        # Return the ticker data in the response model format
+        return TickerResponse(
+            symbol=quote["symbol"],
+            price=quote["price"],
+            change=quote["change"],
+            change_percent=quote["change_percent"],
+            high=quote["high"],
+            low=quote["low"],
+            previous_close=quote["previous_close"],
+            timestamp=quote["timestamp"],
+            source=quote["source"]
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Ticker API error for {request.symbol}: {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail={
+                "error": "Internal server error",
+                "message": f"Failed to process ticker request for {request.symbol}",
+                "ticker": request.symbol.upper()
+            }
+        )
+
+@app.get("/api/ticker/{symbol}", response_model=TickerResponse)
+async def get_ticker_price_by_path(symbol: str):
+    """Get real-time price data for a single ticker via URL path (alternative endpoint)"""
+    # Validate symbol length
+    if len(symbol) > 10 or len(symbol) < 1:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Invalid ticker symbol",
+                "message": "Ticker symbol must be between 1-10 characters",
+                "ticker": symbol.upper()
+            }
+        )
+    
+    # Create request object and call the main function
+    request = TickerRequest(symbol=symbol)
+    return await get_ticker_price(request)
 
 @app.get("/api/market-sentiment")
 async def get_market_sentiment():
@@ -1098,6 +2187,63 @@ async def ai_trading_analyst(request: TradingAnalysisRequest):
         logger.error(f"Trading analyst error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/analyze-questionnaire", response_model=QuestionnaireResponse)
+async def analyze_questionnaire(request: QuestionnaireRequest):
+    """
+    🎯 QUESTIONNAIRE ANALYSIS API
+    
+    Analyzes user investment questionnaire to determine:
+    - Risk score (1-5)
+    - Risk level (e.g., "Very Low", "Moderate", "High")
+    - Portfolio strategy name (e.g., "Ultra Conservative Growth Portfolio - 1/5")
+    
+    The AI analyzes factors like:
+    - Investment goals and time horizon
+    - Risk tolerance and experience level
+    - Income, net worth, and liquidity needs
+    - Sector preferences and restrictions
+    
+    Returns comprehensive risk assessment and strategy recommendations.
+    """
+    try:
+        # Parse the stringified questionnaire JSON
+        import json
+        try:
+            questionnaire_data = json.loads(request.questionnaire)
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON in questionnaire: {e}")
+            raise HTTPException(status_code=400, detail="Invalid questionnaire JSON format")
+        
+        # Analyze the questionnaire using AI service
+        analysis = await ai_service.analyze_questionnaire(questionnaire_data)
+        
+        # Save analysis to database if available
+        if supabase:
+            try:
+                supabase.table("questionnaire_analysis").insert({
+                    "analysis_date": datetime.now().isoformat(),
+                    "risk_score": analysis["risk_score"],
+                    "risk_level": analysis["risk_level"],
+                    "portfolio_strategy": analysis["portfolio_strategy_name"],
+                    "questionnaire_data": questionnaire_data,
+                    "confidence": analysis["confidence"]
+                }).execute()
+            except Exception as e:
+                logger.error(f"Failed to save questionnaire analysis: {e}")
+        
+        return QuestionnaireResponse(
+            risk_score=analysis["risk_score"],
+            risk_level=analysis["risk_level"],
+            portfolio_strategy_name=analysis["portfolio_strategy_name"],
+            analysis_details=analysis["analysis_details"]
+        )
+        
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions
+    except Exception as e:
+        logger.error(f"Questionnaire analysis error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to analyze questionnaire: {str(e)}")
+
 # ============================================================================
 # UNIFIED INVESTMENT STRATEGY ENDPOINT
 # ============================================================================
@@ -1107,16 +2253,18 @@ async def create_unified_investment_strategy(request: UnifiedStrategyRequest):
     """
     🚀 UNIFIED INVESTMENT STRATEGY API
     
-    Creates a comprehensive investment strategy by orchestrating all available services:
-    - Portfolio analysis and rebalancing recommendations
-    - Real-time market data and technical analysis
-    - AI-powered market insights and risk assessment
-    - Actionable trade orders with priorities and execution guidelines
+    Creates a comprehensive investment strategy integrating questionnaire results with market data:
+    - Fetches investment profile based on risk score
+    - Gets AI recommendations for actual stock symbols
+    - Fetches real market data from Alpha Vantage
+    - Re-evaluates strategy with AI using actual market values
+    - Provides confidence score (inverse to risk score)
+    - Recommends portfolio re-evaluation timeline
     
-    Returns detailed trading recommendations for frontend execution.
+    Returns detailed investment allocations with market-based recommendations.
     """
     try:
-        logger.info(f"Creating unified strategy for portfolio value: ${request.total_value:,.2f}")
+        logger.info(f"Creating enhanced strategy for risk score {request.risk_score} with ${request.investment_amount:,.2f}")
         
         # Call the orchestrator to create comprehensive strategy
         strategy = await orchestrator_service.create_investment_strategy(request)
@@ -1130,10 +2278,10 @@ async def create_unified_investment_strategy(request: UnifiedStrategyRequest):
         }
         
     except Exception as e:
-        logger.error(f"Unified strategy creation error: {e}")
+        logger.error(f"Enhanced unified strategy creation error: {e}")
         raise HTTPException(
             status_code=500, 
-            detail=f"Failed to create unified investment strategy: {str(e)}"
+            detail=f"Failed to create enhanced investment strategy: {str(e)}"
         )
 
 # ============================================================================
