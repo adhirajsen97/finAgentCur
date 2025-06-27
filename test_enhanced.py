@@ -361,6 +361,83 @@ class TestEnhancedFinAgent:
         except Exception as e:
             print(f"❌ Portfolio history test failed: {e}")
             return False
+
+    async def test_bulk_ticker_api(self):
+        """Test the bulk ticker API with multiple symbols"""
+        print("\n🚀 Testing Bulk Ticker API...")
+        
+        try:
+            payload = {
+                "symbols": ["AAPL", "MSFT", "GOOGL", "TSLA", "NVDA"]
+            }
+            
+            response = await self.client.post("/api/ticker/bulk", json=payload)
+            print(f"Bulk Ticker Status: {response.status_code}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                print(f"✅ Successfully fetched {data['success_count']}/{data['total_requested']} symbols")
+                print(f"   Errors: {data['error_count']}")
+                
+                # Display some ticker data
+                for symbol, ticker_data in list(data['tickers'].items())[:3]:  # Show first 3
+                    print(f"   {symbol}: ${ticker_data['price']:.2f} ({ticker_data['change_percent']})")
+                
+                if data['errors']:
+                    print(f"   Errors encountered: {data['errors']}")
+                    
+                assert data['success_count'] > 0, "Should have at least some successful fetches"
+                assert data['total_requested'] == 5, "Should show 5 total requested"
+                assert data['source'] == "finnhub", "Should use Finnhub as source"
+                
+                print("✅ Bulk ticker API test passed!")
+                return True
+            else:
+                print(f"❌ Bulk ticker request failed: {response.status_code}")
+                return False
+                
+        except Exception as e:
+            print(f"❌ Bulk ticker API test failed: {e}")
+            return False
+
+    async def test_bulk_ticker_api_edge_cases(self):
+        """Test bulk ticker API edge cases"""
+        print("\n🔧 Testing Bulk Ticker API Edge Cases...")
+        
+        try:
+            # Test with duplicate symbols
+            payload = {
+                "symbols": ["AAPL", "AAPL", "MSFT", "MSFT", "GOOGL"]
+            }
+            
+            response = await self.client.post("/api/ticker/bulk", json=payload)
+            print(f"Duplicate Symbols Status: {response.status_code}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                print(f"✅ Handled duplicates: requested 5, processed {data['total_requested']}")
+                assert data['total_requested'] == 3, "Should remove duplicates"
+            
+            # Test with empty list (should fail validation)
+            payload = {"symbols": []}
+            response = await self.client.post("/api/ticker/bulk", json=payload)
+            print(f"Empty List Status: {response.status_code}")
+            assert response.status_code == 422, "Should reject empty symbol list"
+            
+            # Test with too many symbols (over limit)
+            payload = {
+                "symbols": [f"SYM{i:02d}" for i in range(25)]  # 25 symbols (over 20 limit)
+            }
+            response = await self.client.post("/api/ticker/bulk", json=payload)
+            print(f"Too Many Symbols Status: {response.status_code}")
+            assert response.status_code == 422, "Should reject too many symbols"
+            
+            print("✅ Bulk ticker edge cases test passed!")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Bulk ticker edge cases test failed: {e}")
+            return False
     
     async def run_all_tests(self):
         """Run all enhanced tests"""
@@ -377,7 +454,9 @@ class TestEnhancedFinAgent:
             self.test_trading_analyst_agent,
             self.test_strategy_performance,
             self.test_compliance_disclosures,
-            self.test_portfolio_history
+            self.test_portfolio_history,
+            self.test_bulk_ticker_api,
+            self.test_bulk_ticker_api_edge_cases
         ]
         
         passed = 0
@@ -420,6 +499,8 @@ async def main():
     tester = TestEnhancedFinAgent()
     success = await tester.run_all_tests()
     return success
+
+
 
 if __name__ == "__main__":
     # Run the tests

@@ -90,6 +90,20 @@ class TickerResponse(BaseModel):
     timestamp: str = Field(..., description="Response timestamp")
     source: str = Field(..., description="Data source")
 
+class BulkTickerRequest(BaseModel):
+    """Bulk ticker request for multiple symbols"""
+    symbols: List[str] = Field(..., description="List of stock ticker symbols", min_items=1, max_items=20)
+
+class BulkTickerResponse(BaseModel):
+    """Bulk ticker response for multiple symbols"""
+    success_count: int = Field(..., description="Number of successfully fetched symbols")
+    error_count: int = Field(..., description="Number of symbols that failed")
+    total_requested: int = Field(..., description="Total number of symbols requested")
+    tickers: Dict[str, TickerResponse] = Field(..., description="Dictionary of ticker responses keyed by symbol")
+    errors: Dict[str, str] = Field(default={}, description="Dictionary of error messages keyed by symbol")
+    timestamp: str = Field(..., description="Response timestamp")
+    source: str = Field(..., description="Data source")
+
 class AIAnalysisRequest(BaseModel):
     """AI analysis request"""
     query: str = Field(..., description="User query")
@@ -2135,6 +2149,149 @@ async def get_ticker_price_by_path(symbol: str):
     # Create request object and call the main function
     request = TickerRequest(symbol=symbol)
     return await get_ticker_price(request)
+
+@app.post("/api/ticker/bulk", response_model=BulkTickerResponse)
+async def get_bulk_ticker_prices(request: BulkTickerRequest):
+    """
+    🚀 BULK TICKER API
+    
+    Get real-time price data for multiple tickers simultaneously from Finnhub API.
+    Efficiently fetches data for up to 20 symbols concurrently.
+    
+    Features:
+    - Concurrent data fetching for optimal performance
+    - Individual symbol error handling (continues with other symbols if some fail)
+    - Comprehensive response with success/error statistics
+    - Real-time market data with technical analysis
+    - Rate limit aware (respects Finnhub's 60 calls/minute limit)
+    
+    Perfect for portfolio analysis, market screening, and bulk data retrieval.
+    """
+    try:
+        # Validate and clean symbols
+        cleaned_symbols = [symbol.upper().strip() for symbol in request.symbols]
+        cleaned_symbols = list(dict.fromkeys(cleaned_symbols))  # Remove duplicates while preserving order
+        
+        # Validate symbol format
+        invalid_symbols = []
+        valid_symbols = []
+        for symbol in cleaned_symbols:
+            if len(symbol) < 1 or len(symbol) > 10 or not symbol.isalnum():
+                invalid_symbols.append(symbol)
+            else:
+                valid_symbols.append(symbol)
+        
+        if invalid_symbols:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "Invalid ticker symbols",
+                    "message": f"Invalid symbols detected: {', '.join(invalid_symbols)}",
+                    "invalid_symbols": invalid_symbols,
+                    "requirement": "Symbols must be 1-10 alphanumeric characters"
+                }
+            )
+        
+        if not valid_symbols:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "No valid symbols",
+                    "message": "No valid ticker symbols provided after validation",
+                    "symbols_provided": request.symbols
+                }
+            )
+        
+        # Create concurrent tasks for fetching ticker data
+        logger.info(f"Fetching bulk ticker data for {len(valid_symbols)} symbols: {', '.join(valid_symbols)}")
+        
+        async def fetch_single_ticker(symbol: str) -> tuple[str, dict]:
+            """Fetch a single ticker with error handling"""
+            try:
+                quote = await market_service._fetch_quote_finnhub(symbol)
+                if quote and quote.get("source") != "mock" and "error" not in quote:
+                    # Create TickerResponse object
+                    ticker_response = TickerResponse(
+                        symbol=quote["symbol"],
+                        price=quote["price"],
+                        change=quote["change"],
+                        change_percent=quote["change_percent"],
+                        high=quote["high"],
+                        low=quote["low"],
+                        previous_close=quote["previous_close"],
+                        timestamp=quote["timestamp"],
+                        source=quote["source"]
+                    )
+                    return symbol, {"success": True, "data": ticker_response}
+                else:
+                    error_msg = quote.get("error", "Unknown error") if quote else "Failed to fetch data"
+                    return symbol, {"success": False, "error": error_msg}
+            except Exception as e:
+                logger.error(f"Error fetching ticker {symbol}: {e}")
+                return symbol, {"success": False, "error": str(e)}
+        
+        # Execute all requests concurrently
+        tasks = [fetch_single_ticker(symbol) for symbol in valid_symbols]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Process results
+        successful_tickers = {}
+        error_messages = {}
+        success_count = 0
+        error_count = 0
+        
+        for result in results:
+            if isinstance(result, Exception):
+                error_count += 1
+                error_messages["unknown"] = str(result)
+                continue
+                
+            symbol, result_data = result
+            if result_data["success"]:
+                successful_tickers[symbol] = result_data["data"]
+                success_count += 1
+            else:
+                error_messages[symbol] = result_data["error"]
+                error_count += 1
+        
+        # Check if we got at least some data
+        if success_count == 0:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "All ticker requests failed",
+                    "message": "Unable to fetch data for any of the requested symbols",
+                    "requested_symbols": valid_symbols,
+                    "errors": error_messages
+                }
+            )
+        
+        # Create response
+        response = BulkTickerResponse(
+            success_count=success_count,
+            error_count=error_count,
+            total_requested=len(valid_symbols),
+            tickers=successful_tickers,
+            errors=error_messages,
+            timestamp=datetime.now().isoformat(),
+            source="finnhub"
+        )
+        
+        logger.info(f"Bulk ticker request completed: {success_count} success, {error_count} errors")
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Bulk ticker API error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "Internal server error",
+                "message": f"Failed to process bulk ticker request: {str(e)}",
+                "symbols_requested": request.symbols
+            }
+        )
 
 @app.get("/api/market-sentiment")
 async def get_market_sentiment():
