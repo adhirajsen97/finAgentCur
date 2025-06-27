@@ -340,3 +340,100 @@ MIT License - see LICENSE file for details.
 - Easy to deploy and maintain
 
 **This is the best of both worlds - all the advanced features you need, without the complexity you don't want!** 🚀 
+
+## 📊 Market Data & Real-Time Quotes
+
+### Single Ticker API
+```bash
+# POST method with JSON body
+curl -X POST "http://localhost:8000/api/ticker" \
+  -H "Content-Type: application/json" \
+  -d '{"symbol": "AAPL"}'
+
+# GET method with URL parameter  
+curl "http://localhost:8000/api/ticker/AAPL"
+```
+
+### 🚀 NEW: Bulk Ticker API
+**Fetch multiple stock prices simultaneously with concurrent processing!**
+
+```bash
+# Fetch multiple symbols at once
+curl -X POST "http://localhost:8000/api/ticker/bulk" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "symbols": ["AAPL", "MSFT", "GOOGL", "TSLA", "NVDA"]
+  }'
+```
+
+**Response Format:**
+```json
+{
+  "success_count": 5,
+  "error_count": 0,
+  "total_requested": 5,
+  "tickers": {
+    "AAPL": {
+      "symbol": "AAPL",
+      "price": 201.00,
+      "change": -0.56,
+      "change_percent": "-0.28%",
+      "high": 202.64,
+      "low": 199.46,
+      "previous_close": 201.56,
+      "timestamp": "2025-06-27T09:44:59.854545",
+      "source": "finnhub"
+    },
+    "MSFT": {
+      "symbol": "MSFT", 
+      "price": 497.45,
+      "change": 5.18,
+      "change_percent": "1.05%",
+      "high": 498.04,
+      "low": 492.81,
+      "previous_close": 492.27,
+      "timestamp": "2025-06-27T09:44:59.857483",
+      "source": "finnhub"
+    }
+  },
+  "errors": {},
+  "timestamp": "2025-06-27T09:44:59.858698",
+  "source": "finnhub"
+}
+```
+
+**Features:**
+- ⚡ **Concurrent Processing**: Fetches all symbols simultaneously for maximum speed
+- 🛡️ **Smart Validation**: Automatically removes duplicates and validates symbol format
+- 🚫 **Rate Limit Aware**: Respects Finnhub's 60 calls/minute limit
+- 📊 **Comprehensive Stats**: Returns success/error counts and detailed metrics
+- 🔄 **Graceful Error Handling**: Continues processing other symbols if some fail
+- 🎯 **Flexible Limits**: Supports 1-20 symbols per request
+
+**Python Example:**
+```python
+import httpx
+
+async def fetch_bulk_tickers():
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            "http://localhost:8000/api/ticker/bulk",
+            json={"symbols": ["AAPL", "MSFT", "GOOGL", "TSLA"]}
+        )
+        
+        data = response.json()
+        print(f"✅ Fetched {data['success_count']}/{data['total_requested']} symbols")
+        
+        for symbol, ticker in data['tickers'].items():
+            print(f"{symbol}: ${ticker['price']:.2f} ({ticker['change_percent']})")
+
+# Run the example
+import asyncio
+asyncio.run(fetch_bulk_tickers())
+```
+
+**Use Cases:**
+- 📈 **Portfolio Analysis**: Get prices for all holdings at once
+- 🔍 **Market Screening**: Analyze multiple stocks simultaneously  
+- 📊 **Dashboard Updates**: Bulk refresh of market data
+- 🎯 **Strategy Backtesting**: Efficient data collection for analysis 

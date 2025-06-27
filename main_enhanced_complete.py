@@ -11,6 +11,9 @@ from typing import Dict, Any, Optional, List
 import logging
 import json
 import math
+import re
+import time
+import hashlib
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -120,6 +123,64 @@ class QuestionnaireResponse(BaseModel):
     portfolio_strategy_name: str = Field(..., description="Portfolio strategy name")
     analysis_details: Dict[str, Any] = Field(..., description="Detailed analysis")
 
+# ============================================================================
+# ENHANCED QUESTIONNAIRE MODELS FOR SECTOR-BASED ALLOCATIONS
+# ============================================================================
+
+class SectorAllocation(BaseModel):
+    """Sector-based allocation recommendation"""
+    sector_name: str = Field(..., description="Sector name (e.g., Technology, Healthcare)")
+    percentage: float = Field(..., ge=0, le=100, description="Allocation percentage")
+    description: str = Field(..., description="Sector description and rationale")
+    examples: List[str] = Field(..., description="Example ETFs/funds for this sector")
+    risk_level: str = Field(..., description="Risk level for this sector (Low/Medium/High)")
+
+class GeographicAllocation(BaseModel):
+    """Geographic allocation breakdown"""
+    domestic: float = Field(..., ge=0, le=100, description="Domestic allocation percentage")
+    international_developed: float = Field(..., ge=0, le=100, description="International developed markets percentage")
+    emerging_markets: float = Field(..., ge=0, le=100, description="Emerging markets percentage")
+    regional_breakdown: Dict[str, float] = Field(default={}, description="Specific regional allocations")
+
+class AssetClassAllocation(BaseModel):
+    """Asset class allocation breakdown"""
+    equities: float = Field(..., ge=0, le=100, description="Total equity allocation percentage")
+    bonds: float = Field(..., ge=0, le=100, description="Total bond allocation percentage")
+    alternatives: float = Field(..., ge=0, le=100, description="Alternative investments percentage")
+    cash: float = Field(..., ge=0, le=100, description="Cash/money market percentage")
+    real_estate: float = Field(default=0, ge=0, le=100, description="Real estate allocation percentage")
+    commodities: float = Field(default=0, ge=0, le=100, description="Commodities allocation percentage")
+
+class DiversificationGuidelines(BaseModel):
+    """Diversification guidelines and constraints"""
+    max_single_sector: float = Field(..., ge=0, le=100, description="Maximum allocation to single sector")
+    min_sectors: int = Field(..., ge=1, description="Minimum number of sectors")
+    rebalancing_threshold: float = Field(..., ge=0, le=100, description="Percentage drift before rebalancing")
+    review_frequency: str = Field(..., description="Recommended review frequency")
+
+class EnhancedQuestionnaireResponse(BaseModel):
+    """Enhanced questionnaire response with sector-based allocations"""
+    # Basic questionnaire results
+    risk_score: int = Field(..., description="Risk score from 1-5")
+    risk_level: str = Field(..., description="Risk level description")
+    portfolio_strategy_name: str = Field(..., description="Portfolio strategy name")
+    
+    # Sector-based allocations
+    sector_allocations: List[SectorAllocation] = Field(..., description="Sector-based allocation recommendations")
+    geographic_allocation: GeographicAllocation = Field(..., description="Geographic diversification")
+    asset_class_allocation: AssetClassAllocation = Field(..., description="Asset class breakdown")
+    
+    # Diversification guidelines
+    diversification_guidelines: DiversificationGuidelines = Field(..., description="Diversification rules and guidelines")
+    
+    # Implementation guidance
+    implementation_notes: List[str] = Field(..., description="Implementation guidance and considerations")
+    suitability_factors: List[str] = Field(..., description="Key suitability factors for this profile")
+    
+    # Standard fields
+    analysis_details: Dict[str, Any] = Field(..., description="Detailed analysis")
+    timestamp: str = Field(..., description="Response timestamp")
+
 class RiskAnalysisRequest(BaseModel):
     """Risk analysis request"""
     portfolio: Dict[str, float] = Field(..., description="Portfolio holdings")
@@ -164,6 +225,318 @@ class TradeOrder(BaseModel):
     priority: str = Field(default="MEDIUM", description="HIGH, MEDIUM, LOW")
     reason: str = Field(..., description="Reason for this trade")
     expected_impact: str = Field(..., description="Expected impact on portfolio")
+
+# ============================================================================
+# GENERIC INVESTMENT PROFILES - SECTOR-BASED ALLOCATIONS
+# ============================================================================
+
+GENERIC_INVESTMENT_PROFILES = {
+    1: {
+        "name": "Ultra Conservative Capital Preservation",
+        "description": "Focus on capital preservation with minimal risk",
+        "sector_allocations": [
+            {
+                "sector_name": "Government Bonds",
+                "percentage": 50.0,
+                "description": "US Treasury bonds and government securities for stability",
+                "examples": ["TLT", "IEF", "SHY", "GOVT"],
+                "risk_level": "Low"
+            },
+            {
+                "sector_name": "Utilities",
+                "percentage": 30.0,
+                "description": "Defensive utility companies with stable dividends",
+                "examples": ["XLU", "VPU", "FIDU"],
+                "risk_level": "Low"
+            },
+            {
+                "sector_name": "Inflation-Protected Securities",
+                "percentage": 20.0,
+                "description": "TIPS and inflation-protected bonds",
+                "examples": ["SCHP", "VTIP", "TIPX"],
+                "risk_level": "Low"
+            }
+        ],
+        "geographic_allocation": {
+            "domestic": 85.0,
+            "international_developed": 15.0,
+            "emerging_markets": 0.0,
+            "regional_breakdown": {"US": 85.0, "Europe": 10.0, "Asia_Developed": 5.0}
+        },
+        "asset_class_allocation": {
+            "equities": 30.0,
+            "bonds": 60.0,
+            "alternatives": 0.0,
+            "cash": 10.0,
+            "real_estate": 0.0,
+            "commodities": 0.0
+        },
+        "diversification_guidelines": {
+            "max_single_sector": 50.0,
+            "min_sectors": 3,
+            "rebalancing_threshold": 5.0,
+            "review_frequency": "Quarterly"
+        }
+    },
+    2: {
+        "name": "Conservative Balanced Growth",
+        "description": "Balanced approach with emphasis on stability and modest growth",
+        "sector_allocations": [
+            {
+                "sector_name": "Broad Market Equities",
+                "percentage": 35.0,
+                "description": "Diversified equity exposure across market cap spectrum",
+                "examples": ["VTI", "ITOT", "SPTM"],
+                "risk_level": "Medium"
+            },
+            {
+                "sector_name": "International Bonds",
+                "percentage": 30.0,
+                "description": "International government and corporate bonds",
+                "examples": ["BNDX", "IAGG", "VTEB"],
+                "risk_level": "Low"
+            },
+            {
+                "sector_name": "Healthcare",
+                "percentage": 15.0,
+                "description": "Healthcare sector for defensive growth",
+                "examples": ["XLV", "VHT", "FHLC"],
+                "risk_level": "Medium"
+            },
+            {
+                "sector_name": "Consumer Staples",
+                "percentage": 10.0,
+                "description": "Essential consumer goods companies",
+                "examples": ["XLP", "VDC", "FSTA"],
+                "risk_level": "Low"
+            },
+            {
+                "sector_name": "Real Estate",
+                "percentage": 10.0,
+                "description": "REITs and real estate investment exposure",
+                "examples": ["VNQ", "SCHH", "FREL"],
+                "risk_level": "Medium"
+            }
+        ],
+        "geographic_allocation": {
+            "domestic": 70.0,
+            "international_developed": 25.0,
+            "emerging_markets": 5.0,
+            "regional_breakdown": {"US": 70.0, "Europe": 15.0, "Asia_Developed": 10.0, "Emerging": 5.0}
+        },
+        "asset_class_allocation": {
+            "equities": 60.0,
+            "bonds": 30.0,
+            "alternatives": 5.0,
+            "cash": 5.0,
+            "real_estate": 10.0,
+            "commodities": 0.0
+        },
+        "diversification_guidelines": {
+            "max_single_sector": 35.0,
+            "min_sectors": 5,
+            "rebalancing_threshold": 7.0,
+            "review_frequency": "Semi-annually"
+        }
+    },
+    3: {
+        "name": "Moderate Growth with Value Focus",
+        "description": "Balanced growth strategy with value tilt and sector diversification",
+        "sector_allocations": [
+            {
+                "sector_name": "Technology",
+                "percentage": 25.0,
+                "description": "Technology companies for growth potential",
+                "examples": ["XLK", "VGT", "FTEC"],
+                "risk_level": "High"
+            },
+            {
+                "sector_name": "Financial Services",
+                "percentage": 20.0,
+                "description": "Banks, insurance, and financial institutions",
+                "examples": ["XLF", "VFH", "FNCL"],
+                "risk_level": "Medium"
+            },
+            {
+                "sector_name": "Healthcare",
+                "percentage": 15.0,
+                "description": "Healthcare and pharmaceutical companies",
+                "examples": ["XLV", "VHT", "FHLC"],
+                "risk_level": "Medium"
+            },
+            {
+                "sector_name": "Consumer Discretionary",
+                "percentage": 15.0,
+                "description": "Non-essential consumer goods and services",
+                "examples": ["XLY", "VCR", "FDIS"],
+                "risk_level": "Medium"
+            },
+            {
+                "sector_name": "International Equity",
+                "percentage": 15.0,
+                "description": "International developed market exposure",
+                "examples": ["VEA", "IEFA", "FTIHX"],
+                "risk_level": "Medium"
+            },
+            {
+                "sector_name": "Cash & Short-term",
+                "percentage": 10.0,
+                "description": "Cash and short-term instruments for liquidity",
+                "examples": ["SHY", "BIL", "VMOT"],
+                "risk_level": "Low"
+            }
+        ],
+        "geographic_allocation": {
+            "domestic": 65.0,
+            "international_developed": 30.0,
+            "emerging_markets": 5.0,
+            "regional_breakdown": {"US": 65.0, "Europe": 20.0, "Asia_Developed": 10.0, "Emerging": 5.0}
+        },
+        "asset_class_allocation": {
+            "equities": 75.0,
+            "bonds": 15.0,
+            "alternatives": 5.0,
+            "cash": 5.0,
+            "real_estate": 0.0,
+            "commodities": 0.0
+        },
+        "diversification_guidelines": {
+            "max_single_sector": 25.0,
+            "min_sectors": 6,
+            "rebalancing_threshold": 10.0,
+            "review_frequency": "Quarterly"
+        }
+    },
+    4: {
+        "name": "Aggressive Growth with Trend Following",
+        "description": "Growth-focused strategy with higher risk tolerance",
+        "sector_allocations": [
+            {
+                "sector_name": "Growth Technology",
+                "percentage": 35.0,
+                "description": "High-growth technology and innovation companies",
+                "examples": ["QQQ", "VGT", "ARKK"],
+                "risk_level": "High"
+            },
+            {
+                "sector_name": "Emerging Markets",
+                "percentage": 20.0,
+                "description": "Emerging market equity exposure",
+                "examples": ["VWO", "IEMG", "EEM"],
+                "risk_level": "High"
+            },
+            {
+                "sector_name": "Small & Mid-Cap",
+                "percentage": 15.0,
+                "description": "Small and mid-cap companies for growth",
+                "examples": ["VB", "VO", "IJH"],
+                "risk_level": "High"
+            },
+            {
+                "sector_name": "Momentum Strategies",
+                "percentage": 15.0,
+                "description": "Momentum-based ETFs and strategies",
+                "examples": ["MTUM", "PDP", "VMOT"],
+                "risk_level": "High"
+            },
+            {
+                "sector_name": "Alternative Investments",
+                "percentage": 10.0,
+                "description": "REITs, commodities, and alternative strategies",
+                "examples": ["VNQ", "DJP", "GLD"],
+                "risk_level": "Medium"
+            },
+            {
+                "sector_name": "Cash Buffer",
+                "percentage": 5.0,
+                "description": "Small cash buffer for opportunities",
+                "examples": ["SHY", "BIL"],
+                "risk_level": "Low"
+            }
+        ],
+        "geographic_allocation": {
+            "domestic": 55.0,
+            "international_developed": 25.0,
+            "emerging_markets": 20.0,
+            "regional_breakdown": {"US": 55.0, "Europe": 15.0, "Asia_Developed": 10.0, "Emerging": 20.0}
+        },
+        "asset_class_allocation": {
+            "equities": 85.0,
+            "bonds": 5.0,
+            "alternatives": 10.0,
+            "cash": 0.0,
+            "real_estate": 0.0,
+            "commodities": 0.0
+        },
+        "diversification_guidelines": {
+            "max_single_sector": 35.0,
+            "min_sectors": 6,
+            "rebalancing_threshold": 15.0,
+            "review_frequency": "Monthly"
+        }
+    },
+    5: {
+        "name": "Maximum Growth High-Risk Portfolio",
+        "description": "Aggressive growth strategy for maximum return potential",
+        "sector_allocations": [
+            {
+                "sector_name": "Leveraged Technology",
+                "percentage": 30.0,
+                "description": "Leveraged and high-beta technology exposure",
+                "examples": ["TQQQ", "TECL", "ARKK"],
+                "risk_level": "High"
+            },
+            {
+                "sector_name": "Disruptive Innovation",
+                "percentage": 25.0,
+                "description": "Disruptive innovation and future technologies",
+                "examples": ["ARKQ", "ARKG", "ICLN"],
+                "risk_level": "High"
+            },
+            {
+                "sector_name": "High-Beta Cyclicals",
+                "percentage": 20.0,
+                "description": "High-beta cyclical sectors",
+                "examples": ["XME", "XRT", "GDXJ"],
+                "risk_level": "High"
+            },
+            {
+                "sector_name": "Emerging Markets Growth",
+                "percentage": 15.0,
+                "description": "High-growth emerging market exposure",
+                "examples": ["EMQQ", "FEM", "ASHR"],
+                "risk_level": "High"
+            },
+            {
+                "sector_name": "Stabilizing Allocation",
+                "percentage": 10.0,
+                "description": "Small allocation to broad market for stability",
+                "examples": ["SPY", "VTI"],
+                "risk_level": "Medium"
+            }
+        ],
+        "geographic_allocation": {
+            "domestic": 45.0,
+            "international_developed": 25.0,
+            "emerging_markets": 30.0,
+            "regional_breakdown": {"US": 45.0, "Europe": 10.0, "Asia_Developed": 15.0, "Emerging": 30.0}
+        },
+        "asset_class_allocation": {
+            "equities": 95.0,
+            "bonds": 0.0,
+            "alternatives": 5.0,
+            "cash": 0.0,
+            "real_estate": 0.0,
+            "commodities": 0.0
+        },
+        "diversification_guidelines": {
+            "max_single_sector": 30.0,
+            "min_sectors": 5,
+            "rebalancing_threshold": 20.0,
+            "review_frequency": "Weekly"
+        }
+    }
+}
 
 # ============================================================================
 # STRAIGHT ARROW STRATEGY
@@ -886,10 +1259,21 @@ INVESTMENT_PROFILE_TEMPLATES = {
 # ============================================================================
 
 class AIAgentService:
-    """Multiple AI agents for different analysis types"""
+    """Enhanced AI service with multiple agent personalities and optimization"""
     
     def __init__(self):
         self.openai_key = OPENAI_API_KEY
+        # Add optimization features
+        self._cache = {}  # Simple in-memory cache
+        self._cache_ttl = 3600  # 1 hour cache TTL
+        self._rate_limit_state = {
+            "last_request": 0,
+            "request_count": 0,
+            "backoff_until": 0,
+            "consecutive_failures": 0
+        }
+        self._max_retries = 3
+        self._base_delay = 1  # Base delay for exponential backoff
     
     async def data_analyst(self, query: str, symbols: List[str] = None) -> Dict[str, Any]:
         """Data analyst agent - market data and fundamental analysis"""
@@ -1015,6 +1399,63 @@ class AIAgentService:
             "source": "openai_gpt3.5"
         }
     
+    # ============================================================================
+    # OPENAI OPTIMIZATION METHODS
+    # ============================================================================
+    
+    def _generate_cache_key(self, prompt: str, agent_type: str) -> str:
+        """Generate a cache key for the request"""
+        content = f"{agent_type}:{prompt}"
+        return hashlib.md5(content.encode()).hexdigest()
+    
+    def _get_from_cache(self, cache_key: str) -> Optional[str]:
+        """Get cached response if valid"""
+        if cache_key in self._cache:
+            cached_item = self._cache[cache_key]
+            if time.time() - cached_item["timestamp"] < self._cache_ttl:
+                return cached_item["response"]
+            else:
+                # Remove expired cache entry
+                del self._cache[cache_key]
+        return None
+    
+    def _store_in_cache(self, cache_key: str, response: str):
+        """Store response in cache"""
+        self._cache[cache_key] = {
+            "response": response,
+            "timestamp": time.time()
+        }
+    
+    def _should_backoff(self) -> bool:
+        """Check if we should backoff due to rate limiting"""
+        return time.time() < self._rate_limit_state["backoff_until"]
+    
+    def _calculate_backoff_delay(self) -> float:
+        """Calculate exponential backoff delay"""
+        failures = self._rate_limit_state["consecutive_failures"]
+        delay = self._base_delay * (2 ** min(failures, 6))  # Cap at 64 seconds
+        return min(delay, 300)  # Max 5 minutes
+    
+    def _handle_rate_limit_error(self, retry_after: int = None):
+        """Handle rate limit error with exponential backoff"""
+        self._rate_limit_state["consecutive_failures"] += 1
+        
+        if retry_after:
+            # Use server-provided retry-after
+            backoff_time = time.time() + retry_after
+        else:
+            # Use exponential backoff
+            delay = self._calculate_backoff_delay()
+            backoff_time = time.time() + delay
+        
+        self._rate_limit_state["backoff_until"] = backoff_time
+        logger.warning(f"Rate limited. Backing off until {backoff_time}")
+    
+    def _reset_rate_limit_state(self):
+        """Reset rate limit state on successful request"""
+        self._rate_limit_state["consecutive_failures"] = 0
+        self._rate_limit_state["backoff_until"] = 0
+
     async def _call_openai(self, prompt: str, agent_type: str) -> str:
         """Call OpenAI API with agent-specific prompting"""
         try:
@@ -1430,7 +1871,286 @@ RISK CONTROLS:
 
 This {template['name']} profile is designed to {template['description'].lower()}. The recommended allocation balances your stated objectives with appropriate risk management for your risk tolerance level.
 
-Please note: This analysis is for educational purposes only and should not be considered as personalized financial advice. Consider consulting with a qualified financial advisor for comprehensive investment planning."""
+        Please note: This analysis is for educational purposes only and should not be considered as personalized financial advice. Consider consulting with a qualified financial advisor for comprehensive investment planning."""
+
+    async def analyze_questionnaire_enhanced(self, questionnaire_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Enhanced questionnaire analysis with sector-based allocations"""
+        try:
+            # Calculate risk score using existing method
+            risk_score = self._calculate_risk_score(questionnaire_data)
+            risk_level = self._determine_risk_level(risk_score)
+            portfolio_strategy_name = self._generate_portfolio_strategy_name(risk_score, risk_level)
+            
+            # Get the generic investment profile
+            profile = GENERIC_INVESTMENT_PROFILES.get(risk_score, GENERIC_INVESTMENT_PROFILES[3])
+            
+            # Convert sector allocations to model objects
+            sector_allocations = [
+                SectorAllocation(
+                    sector_name=sector["sector_name"],
+                    percentage=sector["percentage"],
+                    description=sector["description"],
+                    examples=sector["examples"],
+                    risk_level=sector["risk_level"]
+                )
+                for sector in profile["sector_allocations"]
+            ]
+            
+            # Create geographic allocation model
+            geographic_allocation = GeographicAllocation(
+                domestic=profile["geographic_allocation"]["domestic"],
+                international_developed=profile["geographic_allocation"]["international_developed"],
+                emerging_markets=profile["geographic_allocation"]["emerging_markets"],
+                regional_breakdown=profile["geographic_allocation"]["regional_breakdown"]
+            )
+            
+            # Create asset class allocation model
+            asset_class_allocation = AssetClassAllocation(
+                equities=profile["asset_class_allocation"]["equities"],
+                bonds=profile["asset_class_allocation"]["bonds"],
+                alternatives=profile["asset_class_allocation"]["alternatives"],
+                cash=profile["asset_class_allocation"]["cash"],
+                real_estate=profile["asset_class_allocation"]["real_estate"],
+                commodities=profile["asset_class_allocation"]["commodities"]
+            )
+            
+            # Create diversification guidelines model
+            diversification_guidelines = DiversificationGuidelines(
+                max_single_sector=profile["diversification_guidelines"]["max_single_sector"],
+                min_sectors=profile["diversification_guidelines"]["min_sectors"],
+                rebalancing_threshold=profile["diversification_guidelines"]["rebalancing_threshold"],
+                review_frequency=profile["diversification_guidelines"]["review_frequency"]
+            )
+            
+            # Generate implementation notes
+            implementation_notes = self._generate_implementation_notes(risk_score, profile)
+            
+            # Generate suitability factors
+            suitability_factors = self._generate_suitability_factors(risk_score, questionnaire_data, profile)
+            
+            # Create detailed analysis
+            analysis_details = {
+                "questionnaire_breakdown": self._breakdown_questionnaire_factors(questionnaire_data),
+                "risk_assessment": {
+                    "risk_score": risk_score,
+                    "risk_level": risk_level,
+                    "key_factors": self._get_risk_factors_summary(questionnaire_data, risk_score)
+                },
+                "strategy_rationale": self._generate_strategy_rationale_enhanced(risk_score, risk_level, questionnaire_data, profile),
+                "diversification_benefits": self._explain_diversification_benefits(profile),
+                "monitoring_recommendations": self._generate_monitoring_recommendations(risk_score, profile)
+            }
+            
+            return {
+                "risk_score": risk_score,
+                "risk_level": risk_level,
+                "portfolio_strategy_name": portfolio_strategy_name,
+                "sector_allocations": [allocation.dict() for allocation in sector_allocations],
+                "geographic_allocation": geographic_allocation.dict(),
+                "asset_class_allocation": asset_class_allocation.dict(),
+                "diversification_guidelines": diversification_guidelines.dict(),
+                "implementation_notes": implementation_notes,
+                "suitability_factors": suitability_factors,
+                "analysis_details": analysis_details,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            logger.error(f"Enhanced questionnaire analysis error: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to analyze questionnaire: {str(e)}"
+            )
+    
+    def _generate_implementation_notes(self, risk_score: int, profile: Dict[str, Any]) -> List[str]:
+        """Generate implementation guidance notes"""
+        notes = []
+        
+        # Risk-specific guidance
+        if risk_score == 1:
+            notes.extend([
+                "Focus on capital preservation over growth",
+                "Consider dollar-cost averaging to minimize timing risk",
+                "Maintain adequate emergency fund before investing",
+                "Review allocations quarterly to ensure stability"
+            ])
+        elif risk_score == 2:
+            notes.extend([
+                "Balance growth and stability through diversification",
+                "Consider index funds and ETFs for cost-effective exposure",
+                "Maintain some cash reserves for opportunities",
+                "Rebalance semi-annually or when allocations drift 5%+"
+            ])
+        elif risk_score == 3:
+            notes.extend([
+                "Focus on long-term growth with moderate risk tolerance",
+                "Diversify across sectors and geographic regions",
+                "Consider value and growth balance in equity allocations",
+                "Monitor and rebalance quarterly based on performance"
+            ])
+        elif risk_score == 4:
+            notes.extend([
+                "Emphasize growth potential over stability",
+                "Consider momentum and trend-following strategies",
+                "Maintain small cash buffer for tactical opportunities",
+                "More frequent monitoring recommended due to higher volatility"
+            ])
+        else:  # risk_score == 5
+            notes.extend([
+                "Maximum growth focus with high risk tolerance",
+                "Consider leveraged and alternative investment vehicles",
+                "Active monitoring and adjustment recommended",
+                "Be prepared for significant portfolio volatility"
+            ])
+        
+        # General implementation guidance
+        notes.extend([
+            "Start with core allocations before adding alternatives",
+            "Consider tax implications in taxable accounts",
+            "Use tax-advantaged accounts (401k, IRA) when possible",
+            "Implement gradually to avoid market timing risk"
+        ])
+        
+        return notes
+    
+    def _generate_suitability_factors(self, risk_score: int, questionnaire_data: Dict[str, Any], profile: Dict[str, Any]) -> List[str]:
+        """Generate key suitability factors for this profile"""
+        factors = []
+        
+        # Time horizon suitability
+        time_horizon = questionnaire_data.get("time_horizon", "")
+        if "short" in time_horizon.lower() and risk_score > 3:
+            factors.append("⚠️ High-risk strategy may not suit short time horizon")
+        elif "long" in time_horizon.lower() and risk_score >= 3:
+            factors.append("✅ Long time horizon supports growth-oriented strategy")
+        
+        # Experience level suitability
+        experience = questionnaire_data.get("experience_level", "")
+        if ("none" in experience.lower() or "little" in experience.lower()) and risk_score > 3:
+            factors.append("⚠️ Limited experience may require additional education for higher-risk investments")
+        elif "extensive" in experience.lower():
+            factors.append("✅ Investment experience supports sophisticated strategy implementation")
+        
+        # Risk tolerance alignment
+        risk_tolerance = questionnaire_data.get("risk_tolerance", "")
+        if risk_score <= 2:
+            factors.append("✅ Conservative approach aligns with risk-averse preferences")
+        elif risk_score >= 4:
+            factors.append("✅ Aggressive strategy matches high risk tolerance")
+        else:
+            factors.append("✅ Moderate approach balances growth and stability")
+        
+        # Liquidity considerations
+        liquidity_needs = questionnaire_data.get("liquidity_needs", "")
+        if risk_score == 1:
+            factors.append("✅ High liquidity maintained through conservative allocations")
+        elif "high" in liquidity_needs.lower() and risk_score > 3:
+            factors.append("⚠️ High liquidity needs may conflict with growth investments")
+        
+        # Portfolio-specific factors
+        factors.extend([
+            f"Expected volatility: {profile.get('volatility_expectation', 'Moderate')}",
+            f"Suitable for: {profile.get('time_horizon_fit', 'Various time horizons')}",
+            f"Primary focus: {profile.get('investment_focus', 'Balanced approach')}"
+        ])
+        
+        return factors
+    
+    def _generate_strategy_rationale_enhanced(self, risk_score: int, risk_level: str, questionnaire_data: Dict[str, Any], profile: Dict[str, Any]) -> str:
+        """Generate enhanced strategy rationale"""
+        rationale = f"The {profile['name']} strategy was selected based on your risk score of {risk_score}/5, "
+        rationale += f"indicating a {risk_level.lower()} risk tolerance. "
+        
+        # Add questionnaire-specific reasoning
+        time_horizon = questionnaire_data.get("time_horizon", "not specified")
+        goal = questionnaire_data.get("investment_goal", "not specified")
+        
+        rationale += f"Your {time_horizon} investment horizon and {goal} investment goal "
+        rationale += f"align well with this {profile['description'].lower()}. "
+        
+        # Add sector-specific reasoning
+        rationale += f"The sector allocation emphasizes "
+        top_sectors = sorted(profile['sector_allocations'], key=lambda x: x['percentage'], reverse=True)[:2]
+        rationale += f"{top_sectors[0]['sector_name']} ({top_sectors[0]['percentage']}%) "
+        rationale += f"and {top_sectors[1]['sector_name']} ({top_sectors[1]['percentage']}%) "
+        rationale += f"to provide {profile['description'].lower()}."
+        
+        return rationale
+    
+    def _explain_diversification_benefits(self, profile: Dict[str, Any]) -> List[str]:
+        """Explain diversification benefits of the strategy"""
+        benefits = []
+        
+        num_sectors = len(profile['sector_allocations'])
+        benefits.append(f"Diversified across {num_sectors} sectors to reduce concentration risk")
+        
+        geo = profile['geographic_allocation']
+        if geo['international_developed'] > 0:
+            benefits.append(f"Geographic diversification with {geo['international_developed']}% international exposure")
+        
+        if geo['emerging_markets'] > 0:
+            benefits.append(f"Emerging market exposure ({geo['emerging_markets']}%) for additional growth potential")
+        
+        asset_classes = profile['asset_class_allocation']
+        active_classes = sum(1 for v in asset_classes.values() if v > 0)
+        benefits.append(f"Multi-asset approach across {active_classes} asset classes")
+        
+        max_single = profile['diversification_guidelines']['max_single_sector']
+        benefits.append(f"Risk management through {max_single}% maximum single sector allocation")
+        
+        return benefits
+    
+    def _generate_monitoring_recommendations(self, risk_score: int, profile: Dict[str, Any]) -> List[str]:
+        """Generate portfolio monitoring recommendations"""
+        recommendations = []
+        
+        review_freq = profile['diversification_guidelines']['review_frequency']
+        rebal_threshold = profile['diversification_guidelines']['rebalancing_threshold']
+        
+        recommendations.extend([
+            f"Review portfolio {review_freq.lower()} for allocation drift",
+            f"Rebalance when any sector exceeds {rebal_threshold}% from target",
+            "Monitor market conditions and sector performance",
+            "Track performance against relevant benchmarks"
+        ])
+        
+        if risk_score >= 4:
+            recommendations.append("Monitor for high volatility periods requiring tactical adjustments")
+        
+        if risk_score <= 2:
+            recommendations.append("Focus on capital preservation and dividend income tracking")
+        
+        recommendations.append("Review strategy annually or after major life changes")
+        
+        return recommendations
+    
+    def _get_risk_factors_summary(self, questionnaire_data: Dict[str, Any], risk_score: int) -> List[str]:
+        """Get summary of key risk factors"""
+        factors = []
+        
+        # Time horizon factor
+        time_horizon = questionnaire_data.get("time_horizon", "")
+        if time_horizon:
+            factors.append(f"Time horizon: {time_horizon}")
+        
+        # Risk tolerance factor
+        risk_tolerance = questionnaire_data.get("risk_tolerance", "")
+        if risk_tolerance:
+            factors.append(f"Risk tolerance: {risk_tolerance}")
+        
+        # Experience factor
+        experience = questionnaire_data.get("experience_level", "")
+        if experience:
+            factors.append(f"Investment experience: {experience}")
+        
+        # Goal factor
+        goal = questionnaire_data.get("investment_goal", "")
+        if goal:
+            factors.append(f"Primary goal: {goal}")
+        
+        factors.append(f"Overall risk assessment: {risk_score}/5")
+        
+        return factors
 
 # ============================================================================
 # UNIFIED STRATEGY ORCHESTRATOR
@@ -1487,6 +2207,9 @@ class UnifiedStrategyOrchestrator:
                 "strategy_id": f"enhanced_strategy_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
                 "created_at": datetime.now().isoformat(),
                 "strategy_type": "AI-Enhanced Questionnaire-Based Strategy",
+                "strategy_name": investment_profile["name"],  # Add missing field
+                "investment_profile": investment_profile,  # Add for test compatibility
+                "confidence_score": confidence_score,  # Move up for easy access
                 
                 # Risk Profile Information
                 "risk_profile": {
@@ -1562,106 +2285,410 @@ class UnifiedStrategyOrchestrator:
             )
     
     def _get_investment_profile(self, risk_score: int) -> Dict[str, Any]:
-        """Fetch investment profile template based on risk score"""
-        return INVESTMENT_PROFILE_TEMPLATES.get(risk_score, INVESTMENT_PROFILE_TEMPLATES[3])
+        """Fetch enhanced investment profile based on risk score using GENERIC_INVESTMENT_PROFILES"""
+        profile = GENERIC_INVESTMENT_PROFILES.get(risk_score, GENERIC_INVESTMENT_PROFILES[3])
+        
+        # Convert sector allocations to base_allocation format for compatibility
+        base_allocation = {}
+        for sector in profile["sector_allocations"]:
+            # Use sector name as key for the allocation
+            sector_key = sector["sector_name"].replace(" ", "_").replace("&", "and")
+            base_allocation[sector_key] = sector["percentage"]
+        
+        # Create enhanced profile with both old and new format
+        enhanced_profile = {
+            "name": profile["name"],
+            "description": profile["description"],
+            "base_allocation": base_allocation,  # For backward compatibility
+            "sector_allocations": profile["sector_allocations"],  # New format
+            "geographic_allocation": profile["geographic_allocation"],
+            "asset_class_allocation": profile["asset_class_allocation"],
+            "diversification_guidelines": profile["diversification_guidelines"],
+            "core_strategy": f"Sector-based {profile['name']} strategy",
+            "risk_level": self._map_risk_score_to_level(risk_score),
+            "volatility_expectation": self._get_volatility_expectation(risk_score),
+            "expected_return": self._get_expected_return(risk_score),
+            "time_horizon_fit": self._get_time_horizon_fit(risk_score)
+        }
+        
+        return enhanced_profile
+    
+    def _map_risk_score_to_level(self, risk_score: int) -> str:
+        """Map risk score to risk level description"""
+        risk_levels = {
+            1: "Very Low",
+            2: "Low", 
+            3: "Moderate",
+            4: "High",
+            5: "Very High"
+        }
+        return risk_levels.get(risk_score, "Moderate")
+    
+    def _get_volatility_expectation(self, risk_score: int) -> str:
+        """Get volatility expectation based on risk score"""
+        volatilities = {
+            1: "Very Low (2-5% annually)",
+            2: "Low (5-10% annually)",
+            3: "Moderate (10-15% annually)", 
+            4: "High (15-25% annually)",
+            5: "Very High (25%+ annually)"
+        }
+        return volatilities.get(risk_score, "Moderate")
+    
+    def _get_expected_return(self, risk_score: int) -> str:
+        """Get expected return based on risk score"""
+        returns = {
+            1: "3-5% annually",
+            2: "4-7% annually",
+            3: "6-9% annually",
+            4: "8-12% annually", 
+            5: "10-15% annually (highly variable)"
+        }
+        return returns.get(risk_score, "6-9% annually")
+    
+    def _get_time_horizon_fit(self, risk_score: int) -> str:
+        """Get time horizon fit based on risk score"""
+        horizons = {
+            1: "Short to medium term (1-5 years)",
+            2: "Medium term (3-7 years)",
+            3: "Medium to long term (5-10 years)",
+            4: "Long term (7-15 years)",
+            5: "Very long term (10+ years)"
+        }
+        return horizons.get(risk_score, "Medium to long term")
     
     async def _get_ai_stock_recommendations(self, investment_profile: Dict[str, Any], 
                                           sector_preferences: List[str], 
                                           investment_restrictions: List[str]) -> Dict[str, List[str]]:
-        """Get AI recommendations for actual stock symbols based on profile and preferences"""
+        """Get enhanced AI recommendations for specific ETFs within each sector allocation"""
         
         profile_name = investment_profile["name"]
-        base_allocation = investment_profile["base_allocation"]
-        core_strategy = investment_profile["core_strategy"]
+        sector_allocations = investment_profile.get("sector_allocations", [])
+        risk_level = investment_profile.get("risk_level", "Moderate")
         
-        # Build AI query for stock recommendations
+        # Get current market sentiment for context
+        try:
+            market_sentiment = await self.market_service.get_market_sentiment()
+            market_context = f"Current market sentiment: {market_sentiment.get('overall_sentiment', 'Neutral')}"
+        except:
+            market_context = "Market sentiment data unavailable"
+        
+        # Build enhanced AI query for competitive sector-specific ETF recommendations
         ai_query = f"""
-        Based on the investment profile '{profile_name}' with strategy '{core_strategy}', 
-        recommend specific ETF symbols for each allocation category:
+        You are a senior portfolio manager at a top-tier investment firm (think BlackRock, Vanguard, Fidelity level). 
+        Provide COMPETITIVE, INSTITUTIONAL-QUALITY ETF recommendations for the '{profile_name}' investment profile.
         
-        Base allocation template: {base_allocation}
-        Sector preferences: {sector_preferences if sector_preferences else 'None specified'}
-        Investment restrictions: {investment_restrictions if investment_restrictions else 'None'}
+        {market_context}
         
-        For each allocation category, provide 1-2 specific ETF symbols that match the strategy.
-        Focus on liquid, well-established ETFs with low expense ratios.
-        Consider sector preferences and avoid restricted investments.
+        INVESTMENT PROFILE ANALYSIS:
+        Strategy: {profile_name}
+        Risk Level: {risk_level}
+        Geographic Allocation: {investment_profile.get('geographic_allocation', {})}
         
-        Return specific ticker symbols that can be traded in the market.
+        SECTOR ALLOCATION REQUIREMENTS:
+        """
+        
+        for i, sector in enumerate(sector_allocations, 1):
+            ai_query += f"""
+        
+        {i}. SECTOR: {sector['sector_name']} ({sector['percentage']}% allocation)
+        Description: {sector['description']}
+        Risk Level: {sector['risk_level']}
+        Current Examples: {', '.join(sector['examples'])}
+        
+        REQUIREMENTS FOR THIS SECTOR:
+        - Recommend 2-3 BEST-IN-CLASS ETFs (prioritize institutional favorites)
+        - Focus on expense ratios <0.25% for large allocations, <0.75% for specialized
+        - Minimum $500M AUM for liquidity
+        - Consider current market valuations and momentum
+        - Avoid leveraged ETFs unless risk level 5 and specifically appropriate
+        """
+        
+        ai_query += f"""
+        
+        USER CONSTRAINTS:
+        Sector Preferences: {sector_preferences if sector_preferences else 'No specific preferences'}
+        Investment Restrictions: {investment_restrictions if investment_restrictions else 'No restrictions'}
+        
+        COMPETITIVE ANALYSIS REQUIREMENTS:
+        1. For each sector, analyze the TOP 3 ETF options by:
+           - Expense ratio comparison
+           - AUM and liquidity metrics
+           - 1-year and 3-year performance vs benchmark
+           - Current market positioning
+        
+        2. Provide PRIMARY choice (best overall) and ALTERNATIVE (solid backup)
+        
+        3. Consider these institutional-grade providers as priorities:
+           - Vanguard (VXX, VTI, VEA series)
+           - iShares BlackRock (IXX, EFA, etc.)
+           - SPDR State Street (SPY, XLX series)
+           - Fidelity (FXXX series)
+           - Schwab (SCHX series)
+        
+        4. For current market conditions, factor in:
+           - Interest rate environment impact on bonds/REITs
+           - Inflation hedging for appropriate sectors
+           - Currency hedging for international exposure
+           - Sector rotation trends
+        
+        FORMAT YOUR RESPONSE:
+        For each sector, provide exactly:
+        PRIMARY: [TICKER] - [Brief rationale]
+        ALTERNATIVE: [TICKER] - [Brief rationale]
+        
+        Focus on tickers that sophisticated institutional investors actually use.
+        Avoid obscure or newly launched ETFs unless they offer clear advantages.
         """
         
         try:
             if self.ai_service.openai_key:
-                ai_response = await self.ai_service._call_openai(ai_query, "stock_recommendation")
+                # Use optimized AI call with caching and rate limiting
+                cache_key = self.ai_service._generate_cache_key(ai_query, "stock_recommendation")
+                cached_response = self.ai_service._get_from_cache(cache_key)
+                
+                if cached_response:
+                    logger.info("Using cached AI stock recommendations")
+                    ai_response = cached_response
+                else:
+                    # Check if we should backoff
+                    if self.ai_service._should_backoff():
+                        wait_time = self.ai_service._rate_limit_state["backoff_until"] - time.time()
+                        logger.warning(f"Rate limit backoff active, using fallback recommendations (wait: {wait_time:.1f}s)")
+                        return self._fallback_sector_recommendations(investment_profile)
+                    
+                    # Make optimized call
+                    ai_response = await self.ai_service._call_openai(ai_query, "stock_recommendation")
+                    self.ai_service._reset_rate_limit_state()
+                    
+                    # Cache successful response
+                    self.ai_service._store_in_cache(cache_key, ai_response)
             else:
-                ai_response = self._mock_ai_stock_recommendations(investment_profile, sector_preferences)
+                ai_response = self._mock_ai_sector_recommendations(investment_profile, sector_preferences)
             
-            # Parse AI response to extract stock symbols
-            recommendations = self._parse_stock_recommendations(ai_response, base_allocation)
+            # Parse AI response to extract sector-specific ETF recommendations
+            recommendations = self._parse_sector_recommendations(ai_response, sector_allocations)
             
         except Exception as e:
-            logger.error(f"AI stock recommendation error: {e}")
-            recommendations = self._fallback_stock_recommendations(investment_profile)
+            logger.error(f"AI sector recommendation error: {e}")
+            recommendations = self._fallback_sector_recommendations(investment_profile)
         
         return recommendations
     
-    def _parse_stock_recommendations(self, ai_response: str, base_allocation: Dict[str, float]) -> Dict[str, List[str]]:
-        """Parse AI response to extract stock recommendations"""
+    def _parse_sector_recommendations(self, ai_response: str, sector_allocations: List[Dict[str, Any]]) -> Dict[str, List[str]]:
+        """Parse AI response to extract sector-specific ETF recommendations"""
         recommendations = {}
         
-        # For mock/simple parsing, use predefined mappings
-        category_mappings = {
-            "SGOV": ["SGOV", "BIL"],  # Short-term Treasury
-            "VPU": ["VPU", "XLU"],   # Utilities
-            "TIPS": ["SCHP", "VTEB"], # Inflation-protected
-            "VTI": ["VTI", "ITOT"],  # Total market
-            "BNDX": ["BNDX", "IAGG"], # International bonds
-            "GSG": ["GSG", "DJP"],   # Commodities
-            "VTV": ["VTV", "IWD"],   # Value
-            "MTUM": ["MTUM", "PDP"], # Momentum
-            "VMOT": ["VMOT", "BIL"], # Short-term
-            "QQQ": ["QQQ", "ONEQ"],  # NASDAQ
-            "VUG": ["VUG", "IWF"],   # Growth
-            "ARKK": ["ARKK", "QTEC"], # Innovation
-            "BND": ["BND", "AGG"],   # Total bond market
-            "TQQQ": ["TQQQ", "TECL"], # 3x Tech
-            "SOXL": ["SOXL", "USD"], # 3x Semiconductors
-            "SPXL": ["SPXL", "UPRO"]  # 3x S&P
+        # Comprehensive sector-to-ETF mapping as fallback
+        sector_etf_mapping = {
+            "Government Bonds": ["SGOV", "TLT", "IEF", "SHY", "GOVT"],
+            "Utilities": ["VPU", "XLU", "FUTY", "PUI", "XLRE"],
+            "Inflation-Protected Securities": ["SCHP", "TIPS", "VTIP", "STIP", "TDTF"],
+            "Broad Market Equities": ["VTI", "ITOT", "SPTM", "FZROX", "FXNAX"],
+            "International Bonds": ["BNDX", "VTEB", "IAGG", "IGOV", "BWX"],
+            "Healthcare": ["VHT", "XLV", "FHLC", "IYH", "XHS"],
+            "Consumer Staples": ["VDC", "XLP", "FSTA", "IYK", "XLP"],
+            "Real Estate": ["VNQ", "XLRE", "FREL", "IYR", "RWR"],
+            "Commodities": ["GSG", "DJP", "PDBC", "DBA", "BCI"],
+            "Technology": ["XLK", "VGT", "QQQ", "FTEC", "IYW"],
+            "Financial Services": ["XLF", "VFH", "FNCL", "IYF", "KBE"],
+            "Consumer Discretionary": ["XLY", "VCR", "FDIS", "IYC", "RTH"],
+            "International": ["VXUS", "FTIHX", "FZILX", "IEFA", "EFA"],
+            "Cash": ["BIL", "SHY", "VMOT", "SGOV", "SCHO"],
+            "Growth Technology": ["QQQ", "VUG", "FTEC", "VGT", "IGV"],
+            "Emerging Markets": ["VWO", "IEMG", "FDEM", "EEM", "SCHE"],
+            "Small/Mid-Cap": ["VTI", "IJR", "VB", "IWM", "VTWO"],
+            "Momentum": ["MTUM", "PDP", "VMOT", "SPMO", "FDMO"],
+            "Alternatives": ["ARKK", "ARKQ", "ARKG", "VDE", "VNQ"],
+            "Leveraged Technology": ["TQQQ", "SOXL", "SPXL", "TECL", "FAS"],
+            "Disruptive Innovation": ["ARKK", "ARKG", "ARKQ", "ARKF", "ARKW"],
+            "High-Beta Cyclicals": ["XLY", "XLF", "XLE", "XLI", "IYT"],
+            "Leveraged ETFs": ["TQQQ", "SOXL", "SPXL", "UPRO", "TNA"]
         }
         
-        for category, allocation in base_allocation.items():
-            if category in category_mappings:
-                recommendations[category] = category_mappings[category]
+        for sector in sector_allocations:
+            sector_name = sector["sector_name"]
+            recommendations[sector_name] = []
+            
+            # Try to extract ETF recommendations from AI response
+            # Look for patterns like "Technology: VGT, QQQ" or "Healthcare: [XLV, VHT]"
+            patterns = [
+                rf"{re.escape(sector_name)}[:]\s*\[([^\]]+)\]",  # [ETF1, ETF2]
+                rf"{re.escape(sector_name)}[:]\s*([A-Z,\s]+)",    # ETF1, ETF2
+                rf"{re.escape(sector_name)}[:\s]+([A-Z]{2,5})",  # Single ETF
+            ]
+            
+            found_recommendations = []
+            for pattern in patterns:
+                matches = re.findall(pattern, ai_response, re.IGNORECASE)
+                for match in matches:
+                    # Clean and split the ETF symbols
+                    etfs = re.findall(r'[A-Z]{2,5}', match.upper())
+                    found_recommendations.extend(etfs)
+            
+            # Use found recommendations or fallback to mapping
+            if found_recommendations:
+                recommendations[sector_name] = found_recommendations[:3]  # Limit to 3 ETFs
             else:
-                # Fallback mapping
-                recommendations[category] = [category]
+                # Use the comprehensive mapping
+                mapped_etfs = sector_etf_mapping.get(sector_name, [])
+                if mapped_etfs:
+                    recommendations[sector_name] = mapped_etfs[:3]
+                else:
+                    # Final fallback - try partial matching
+                    for map_sector, etfs in sector_etf_mapping.items():
+                        if any(word.lower() in sector_name.lower() for word in map_sector.split()):
+                            recommendations[sector_name] = etfs[:2]
+                            break
+                    
+                    # If still no match, use broad market ETF
+                    if not recommendations[sector_name]:
+                        recommendations[sector_name] = ["VTI", "BND"]
         
         return recommendations
     
-    def _mock_ai_stock_recommendations(self, investment_profile: Dict[str, Any], sector_preferences: List[str]) -> str:
-        """Mock AI stock recommendations for testing"""
+    def _mock_ai_sector_recommendations(self, investment_profile: Dict[str, Any], sector_preferences: List[str]) -> str:
+        """Mock AI sector recommendations for testing"""
         profile_name = investment_profile["name"]
-        return f"""For {profile_name}, I recommend the following ETFs:
+        sector_allocations = investment_profile.get("sector_allocations", [])
         
-        - Treasury/Bond allocation: SGOV, BND, BNDX for stability
-        - Equity allocation: VTI, QQQ, VUG for growth
-        - Sector allocation: Based on preferences {sector_preferences}
-        - Alternative allocation: GSG, ARKK for diversification
+        mock_response = f"""For {profile_name}, I recommend the following sector-specific ETFs:
         
-        These selections provide optimal risk-return characteristics for the specified profile."""
+"""
+        
+        # Generate realistic sector recommendations
+        for sector in sector_allocations:
+            sector_name = sector["sector_name"]
+            percentage = sector["percentage"]
+            examples = sector.get("examples", [])
+            
+            # Select appropriate ETFs based on sector
+            if sector_name == "Government Bonds":
+                etfs = ["SGOV", "TLT"]
+                rationale = "stability and capital preservation"
+            elif sector_name == "Technology":
+                etfs = ["QQQ", "XLK"]
+                rationale = "growth potential and innovation exposure"
+            elif sector_name == "Healthcare":
+                etfs = ["XLV", "VHT"]
+                rationale = "defensive characteristics and demographic trends"
+            elif sector_name == "International":
+                etfs = ["VXUS", "EFA"]
+                rationale = "geographic diversification"
+            elif sector_name == "Real Estate":
+                etfs = ["VNQ", "XLRE"]
+                rationale = "inflation hedge and income generation"
+            elif sector_name == "Emerging Markets":
+                etfs = ["VWO", "EEM"]
+                rationale = "higher growth potential"
+            elif sector_name == "Growth Technology":
+                etfs = ["QQQ", "VGT"]
+                rationale = "aggressive growth and innovation"
+            elif sector_name == "Leveraged Technology":
+                etfs = ["TQQQ", "SOXL"]
+                rationale = "leveraged technology exposure for maximum growth"
+            elif sector_name == "Disruptive Innovation":
+                etfs = ["ARKK", "ARKQ"]
+                rationale = "exposure to disruptive technologies"
+            else:
+                # Use examples from the sector or fallback
+                etfs = examples[:2] if examples else ["VTI", "BND"]
+                rationale = f"diversified exposure to {sector_name.lower()}"
+            
+            mock_response += f"{sector_name}: [{etfs[0]}, {etfs[1] if len(etfs) > 1 else etfs[0]}] - {rationale} ({percentage}% allocation)\n"
+        
+        mock_response += f"""
+        
+These selections provide optimal risk-return characteristics for the {profile_name} strategy.
+        
+Key considerations:
+        - Low expense ratios and high liquidity
+        - Strong performance track records
+        - Appropriate risk levels for the specified profile
+        - Good sector diversification
+        
+Sector preferences noted: {', '.join(sector_preferences) if sector_preferences else 'None specified'}
+        """
+        
+        return mock_response
     
-    def _fallback_stock_recommendations(self, investment_profile: Dict[str, Any]) -> Dict[str, List[str]]:
-        """Fallback stock recommendations if AI fails"""
-        base_allocation = investment_profile["base_allocation"]
-        fallback_map = {
-            "SGOV": ["SGOV"], "VPU": ["VPU"], "TIPS": ["SCHP"],
-            "VTI": ["VTI"], "BNDX": ["BNDX"], "GSG": ["GSG"],
-            "VTV": ["VTV"], "MTUM": ["MTUM"], "VMOT": ["BIL"],
-            "QQQ": ["QQQ"], "VUG": ["VUG"], "ARKK": ["ARKK"],
-            "BND": ["BND"], "TQQQ": ["TQQQ"], "SOXL": ["SOXL"], "SPXL": ["SPXL"]
+    def _fallback_sector_recommendations(self, investment_profile: Dict[str, Any]) -> Dict[str, List[str]]:
+        """Fallback sector recommendations if AI fails"""
+        
+        # Get sector allocations from the investment profile
+        sector_allocations = investment_profile.get("sector_allocations", [])
+        
+        # Comprehensive sector-to-ETF mapping
+        sector_etf_mapping = {
+            "Government Bonds": ["SGOV", "TLT", "IEF", "SHY", "GOVT"],
+            "Utilities": ["VPU", "XLU", "FUTY", "PUI", "XLRE"],
+            "Inflation-Protected Securities": ["SCHP", "TIPS", "VTIP", "STIP", "TDTF"],
+            "Broad Market Equities": ["VTI", "ITOT", "SPTM", "FZROX", "FXNAX"],
+            "International Bonds": ["BNDX", "VTEB", "IAGG", "IGOV", "BWX"],
+            "Healthcare": ["VHT", "XLV", "FHLC", "IYH", "XHS"],
+            "Consumer Staples": ["VDC", "XLP", "FSTA", "IYK", "XLP"],
+            "Real Estate": ["VNQ", "XLRE", "FREL", "IYR", "RWR"],
+            "Commodities": ["GSG", "DJP", "PDBC", "DBA", "BCI"],
+            "Technology": ["XLK", "VGT", "QQQ", "FTEC", "IYW"],
+            "Financial Services": ["XLF", "VFH", "FNCL", "IYF", "KBE"],
+            "Consumer Discretionary": ["XLY", "VCR", "FDIS", "IYC", "RTH"],
+            "International": ["VXUS", "FTIHX", "FZILX", "IEFA", "EFA"],
+            "Cash": ["BIL", "SHY", "VMOT", "SGOV", "SCHO"],
+            "Growth Technology": ["QQQ", "VUG", "FTEC", "VGT", "IGV"],
+            "Emerging Markets": ["VWO", "IEMG", "FDEM", "EEM", "SCHE"],
+            "Small/Mid-Cap": ["VTI", "IJR", "VB", "IWM", "VTWO"],
+            "Momentum": ["MTUM", "PDP", "VMOT", "SPMO", "FDMO"],
+            "Alternatives": ["ARKK", "ARKQ", "ARKG", "VDE", "VNQ"],
+            "Leveraged Technology": ["TQQQ", "SOXL", "SPXL", "TECL", "FAS"],
+            "Disruptive Innovation": ["ARKK", "ARKG", "ARKQ", "ARKF", "ARKW"],
+            "High-Beta Cyclicals": ["XLY", "XLF", "XLE", "XLI", "IYT"],
+            "Leveraged ETFs": ["TQQQ", "SOXL", "SPXL", "UPRO", "TNA"]
         }
         
-        return {category: fallback_map.get(category, [category]) for category in base_allocation.keys()}
+        recommendations = {}
+        
+        # Map each sector to appropriate ETFs
+        for sector in sector_allocations:
+            sector_name = sector["sector_name"]
+            
+            # Direct mapping from the sector name
+            mapped_etfs = sector_etf_mapping.get(sector_name, [])
+            
+            if mapped_etfs:
+                recommendations[sector_name] = mapped_etfs[:3]  # Limit to 3 ETFs
+            else:
+                # Try partial matching for similar sector names
+                found_match = False
+                for map_sector, etfs in sector_etf_mapping.items():
+                    if any(word.lower() in sector_name.lower() for word in map_sector.split()):
+                        recommendations[sector_name] = etfs[:2]
+                        found_match = True
+                        break
+                
+                # Final fallback
+                if not found_match:
+                    if "bond" in sector_name.lower() or "fixed" in sector_name.lower():
+                        recommendations[sector_name] = ["BND", "AGG"]
+                    elif "equity" in sector_name.lower() or "stock" in sector_name.lower():
+                        recommendations[sector_name] = ["VTI", "VEA"]
+                    elif "international" in sector_name.lower() or "global" in sector_name.lower():
+                        recommendations[sector_name] = ["VXUS", "EFA"]
+                    else:
+                        recommendations[sector_name] = ["VTI", "BND"]  # Balanced fallback
+        
+        # If no sector allocations available, use base allocation as backup
+        if not recommendations:
+            base_allocation = investment_profile.get("base_allocation", {})
+            fallback_map = {
+                "SGOV": ["SGOV"], "VPU": ["VPU"], "TIPS": ["SCHP"],
+                "VTI": ["VTI"], "BNDX": ["BNDX"], "GSG": ["GSG"],
+                "VTV": ["VTV"], "MTUM": ["MTUM"], "VMOT": ["BIL"],
+                "QQQ": ["QQQ"], "VUG": ["VUG"], "ARKK": ["ARKK"],
+                "BND": ["BND"], "TQQQ": ["TQQQ"], "SOXL": ["SOXL"], "SPXL": ["SPXL"]
+            }
+            recommendations = {category: fallback_map.get(category, [category]) for category in base_allocation.keys()}
+        
+        return recommendations
     
     async def _fetch_market_data_for_recommendations(self, stock_recommendations: Dict[str, List[str]]) -> Dict[str, Dict[str, Any]]:
         """Fetch real market data for all recommended stocks"""
@@ -2400,6 +3427,78 @@ async def analyze_questionnaire(request: QuestionnaireRequest):
     except Exception as e:
         logger.error(f"Questionnaire analysis error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to analyze questionnaire: {str(e)}")
+
+@app.post("/api/analyze-questionnaire-enhanced", response_model=EnhancedQuestionnaireResponse)
+async def analyze_questionnaire_enhanced(request: QuestionnaireRequest):
+    """
+    🎯 ENHANCED QUESTIONNAIRE ANALYSIS API
+    
+    Enhanced questionnaire analysis providing sector-based allocation framework:
+    - Risk score (1-5) and level assessment
+    - Sector-based allocation recommendations (not specific stocks)
+    - Geographic and asset class diversification
+    - Implementation guidance and suitability factors
+    - Professional portfolio construction framework
+    
+    Returns comprehensive sector allocation guidance allowing users to choose
+    their own ETFs/funds within each recommended sector allocation.
+    """
+    try:
+        # Parse the stringified questionnaire JSON
+        import json
+        try:
+            questionnaire_data = json.loads(request.questionnaire)
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON in questionnaire: {e}")
+            raise HTTPException(status_code=400, detail="Invalid questionnaire JSON format")
+        
+        # Analyze the questionnaire using enhanced AI service
+        analysis = await ai_service.analyze_questionnaire_enhanced(questionnaire_data)
+        
+        # Convert to response model
+        response = EnhancedQuestionnaireResponse(
+            risk_score=analysis["risk_score"],
+            risk_level=analysis["risk_level"],
+            portfolio_strategy_name=analysis["portfolio_strategy_name"],
+            sector_allocations=[
+                SectorAllocation(**allocation) for allocation in analysis["sector_allocations"]
+            ],
+            geographic_allocation=GeographicAllocation(**analysis["geographic_allocation"]),
+            asset_class_allocation=AssetClassAllocation(**analysis["asset_class_allocation"]),
+            diversification_guidelines=DiversificationGuidelines(**analysis["diversification_guidelines"]),
+            implementation_notes=analysis["implementation_notes"],
+            suitability_factors=analysis["suitability_factors"],
+            analysis_details=analysis["analysis_details"],
+            timestamp=analysis["timestamp"]
+        )
+        
+        # Save enhanced analysis to database if available
+        if supabase:
+            try:
+                supabase.table("enhanced_questionnaire_analyses").insert({
+                    "analysis_date": analysis["timestamp"],
+                    "risk_score": analysis["risk_score"],
+                    "risk_level": analysis["risk_level"],
+                    "portfolio_strategy": analysis["portfolio_strategy_name"],
+                    "sector_allocations": analysis["sector_allocations"],
+                    "geographic_allocation": analysis["geographic_allocation"],
+                    "asset_class_allocation": analysis["asset_class_allocation"],
+                    "diversification_guidelines": analysis["diversification_guidelines"],
+                    "implementation_notes": analysis["implementation_notes"],
+                    "suitability_factors": analysis["suitability_factors"],
+                    "questionnaire_data": questionnaire_data,
+                    "analysis_details": analysis["analysis_details"]
+                }).execute()
+            except Exception as e:
+                logger.error(f"Failed to save enhanced questionnaire analysis: {e}")
+        
+        return response
+        
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions
+    except Exception as e:
+        logger.error(f"Enhanced questionnaire analysis error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to analyze enhanced questionnaire: {str(e)}")
 
 # ============================================================================
 # UNIFIED INVESTMENT STRATEGY ENDPOINT
