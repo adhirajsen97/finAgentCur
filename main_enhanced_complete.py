@@ -27,6 +27,14 @@ import httpx
 from dotenv import load_dotenv
 load_dotenv()
 
+# Import new market insight parser APIs
+from market_insight_parser import (
+    URLContentParser, AIPortfolioRebalancer,
+    URLParseRequest, URLParseResponse, 
+    PortfolioRebalanceRequest, PortfolioRebalanceResponse,
+    parse_url_endpoint, rebalance_portfolio_endpoint
+)
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -3020,6 +3028,10 @@ market_service = MarketDataService()
 ai_service = AIAgentService()
 orchestrator_service = UnifiedStrategyOrchestrator(strategy_service, market_service, ai_service)
 
+# Initialize new market insight parser services
+url_parser_service = URLContentParser(ai_service)
+portfolio_rebalancer_service = AIPortfolioRebalancer(ai_service, market_service)
+
 # ============================================================================
 # API ENDPOINTS
 # ============================================================================
@@ -3034,7 +3046,7 @@ async def root():
         "workflow_guide": "/workflow",
         "workflow_api": "/api/workflow-guide",
         "strategy": "Straight Arrow",
-        "features": ["Portfolio Analysis", "Risk Metrics", "AI Agents", "Compliance", "Market Data"],
+        "features": ["Portfolio Analysis", "Risk Metrics", "AI Agents", "Compliance", "Market Data", "URL Parser", "AI Rebalancer"],
         "quick_start": {
             "1": "GET /health - Check system status",
             "2": "GET /api/workflow-guide - Complete usage guide",
@@ -4006,6 +4018,207 @@ interface ErrorResponse {
             }
         }
     }
+
+# ============================================================================
+# NEW MARKET INSIGHT PARSER & PORTFOLIO REBALANCER APIS
+# ============================================================================
+
+@app.post("/api/parse-url", response_model=URLParseResponse)
+async def parse_url_for_financial_content(request: URLParseRequest):
+    """
+    🌐 URL FINANCIAL CONTENT PARSER API
+    
+    Parses any URL to extract and validate financial/market-related content:
+    - Web scraping with content validation
+    - Financial keyword detection and classification
+    - AI-powered content analysis and summary
+    - Market sentiment extraction
+    - Sector and ticker identification
+    - Confidence scoring for financial relevance
+    
+    Returns structured financial insights if content is market-related,
+    or error message if content is not financial in nature.
+    
+    Example URLs:
+    - Financial news articles (Bloomberg, Reuters, CNBC)
+    - Company earnings reports
+    - Market analysis blogs
+    - Investment research reports
+    """
+    try:
+        logger.info(f"Parsing URL for financial content: {request.url}")
+        result = await parse_url_endpoint(request, url_parser_service)
+        
+        # Save to database if financial content found
+        if result.is_financial and supabase:
+            try:
+                supabase.table("parsed_financial_content").insert({
+                    "url": result.url,
+                    "title": result.financial_content.title if result.financial_content else None,
+                    "market_sentiment": result.financial_content.market_sentiment if result.financial_content else None,
+                    "sectors_mentioned": result.financial_content.sectors_mentioned if result.financial_content else [],
+                    "tickers_mentioned": result.financial_content.tickers_mentioned if result.financial_content else [],
+                    "confidence_score": result.financial_content.confidence_score if result.financial_content else 0,
+                    "parsed_at": result.timestamp
+                }).execute()
+            except Exception as e:
+                logger.error(f"Failed to save parsed content: {e}")
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"URL parsing error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to parse URL: {str(e)}")
+
+@app.post("/api/rebalance-portfolio", response_model=PortfolioRebalanceResponse)
+async def ai_rebalance_portfolio_with_insights(request: PortfolioRebalanceRequest):
+    """
+    🤖 AI PORTFOLIO REBALANCER WITH MARKET INSIGHTS
+    
+    Uses AI to rebalance portfolio based on market insights from parsed URLs:
+    - Analyzes impact of market insights on current holdings
+    - Adjusts risk profile based on market sentiment and insights
+    - Generates specific rebalancing actions (BUY/SELL/HOLD)
+    - Prioritizes actions based on insight relevance and confidence
+    - Provides implementation timeline and monitoring recommendations
+    - Calculates projected portfolio value and risk metrics
+    
+    Example workflow:
+    1. Parse financial URL with /api/parse-url
+    2. Get financial_content from response  
+    3. Use financial_content as market_insights in this endpoint
+    4. Receive specific rebalancing recommendations
+    
+    Key features:
+    - Sector-based reallocation based on insights
+    - Risk profile adjustments for market conditions
+    - Ticker-specific actions for mentioned stocks
+    - AI-powered rationale for each recommendation
+    """
+    try:
+        logger.info(f"AI rebalancing portfolio with insights: {len(request.portfolio_holdings)} holdings")
+        
+        # Validate that market insights are provided
+        if not request.market_insights:
+            raise HTTPException(
+                status_code=400, 
+                detail="Market insights are required. Please use /api/parse-url first to get financial content."
+            )
+        
+        # Validate insight confidence
+        if request.market_insights.confidence_score < 50:
+            logger.warning(f"Low confidence market insights: {request.market_insights.confidence_score}")
+        
+        result = await rebalance_portfolio_endpoint(request, portfolio_rebalancer_service)
+        
+        # Save rebalancing analysis to database
+        if supabase:
+            try:
+                supabase.table("portfolio_rebalancing_analyses").insert({
+                    "total_portfolio_value": request.total_portfolio_value,
+                    "available_cash": request.available_cash,
+                    "original_risk_score": request.risk_profile.risk_score,
+                    "adjusted_risk_score": result.adjusted_risk_profile.adjusted_risk_score,
+                    "market_sentiment": request.market_insights.market_sentiment,
+                    "insight_confidence": request.market_insights.confidence_score,
+                    "rebalancing_actions_count": len(result.rebalancing_actions),
+                    "high_priority_actions": len([a for a in result.rebalancing_actions if a.priority == "HIGH"]),
+                    "projected_value": result.projected_portfolio_value,
+                    "confidence_score": result.confidence_score,
+                    "analysis_timestamp": result.timestamp
+                }).execute()
+            except Exception as e:
+                logger.error(f"Failed to save rebalancing analysis: {e}")
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Portfolio rebalancing error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to rebalance portfolio: {str(e)}")
+
+# ============================================================================
+# COMBINED WORKFLOW ENDPOINT
+# ============================================================================
+
+@app.post("/api/url-to-portfolio-action")
+async def url_to_portfolio_action(url: str, portfolio_holdings: List[dict], 
+                                 total_portfolio_value: float, available_cash: float = 0.0,
+                                 risk_profile: dict = None):
+    """
+    🚀 COMPLETE URL-TO-PORTFOLIO-ACTION WORKFLOW
+    
+    One-step API that combines URL parsing and portfolio rebalancing:
+    1. Parses the provided URL for financial content
+    2. Validates financial relevance
+    3. Uses insights to rebalance the portfolio
+    4. Returns complete analysis and actionable recommendations
+    
+    Perfect for automated trading systems and portfolio management tools.
+    """
+    try:
+        # Step 1: Parse URL
+        url_request = URLParseRequest(url=url)
+        url_result = await parse_url_endpoint(url_request, url_parser_service)
+        
+        if not url_result.is_financial:
+            return {
+                "status": "error",
+                "message": "URL does not contain financial content",
+                "url_analysis": url_result,
+                "portfolio_action": None
+            }
+        
+        # Step 2: Prepare portfolio data
+        from market_insight_parser import PortfolioHolding, RiskProfile
+        
+        # Convert holdings
+        holdings = []
+        for holding in portfolio_holdings:
+            holdings.append(PortfolioHolding(**holding))
+        
+        # Create default risk profile if not provided
+        if not risk_profile:
+            risk_profile = {
+                "risk_score": 3,
+                "risk_tolerance": "moderate",
+                "time_horizon": "5-10 years",
+                "liquidity_needs": "20-40% accessible",
+                "sector_preferences": [],
+                "sector_restrictions": []
+            }
+        
+        risk_prof = RiskProfile(**risk_profile)
+        
+        # Step 3: Rebalance portfolio
+        rebalance_request = PortfolioRebalanceRequest(
+            portfolio_holdings=holdings,
+            total_portfolio_value=total_portfolio_value,
+            available_cash=available_cash,
+            risk_profile=risk_prof,
+            market_insights=url_result.financial_content
+        )
+        
+        rebalance_result = await rebalance_portfolio_endpoint(rebalance_request, portfolio_rebalancer_service)
+        
+        return {
+            "status": "success",
+            "url_analysis": url_result,
+            "portfolio_action": rebalance_result,
+            "summary": {
+                "market_sentiment": url_result.financial_content.market_sentiment,
+                "confidence": url_result.financial_content.confidence_score,
+                "actions_recommended": len(rebalance_result.rebalancing_actions),
+                "high_priority_actions": len([a for a in rebalance_result.rebalancing_actions if a.priority == "HIGH"]),
+                "implementation_timeline": rebalance_result.implementation_timeline
+            },
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"URL-to-portfolio-action error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to process URL to portfolio action: {str(e)}")
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
